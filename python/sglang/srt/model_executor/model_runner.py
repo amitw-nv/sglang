@@ -149,6 +149,7 @@ from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
 from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
     RemoteInstanceWeightLoaderBackend,
     register_memory_region,
+    register_memory_region_nixl,
     trigger_init_weights_send_group_for_remote_instance_request,
 )
 from sglang.srt.model_loader.utils import set_default_torch_dtype
@@ -356,6 +357,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
         self.remote_instance_transfer_engine_weight_info = None
+        self.remote_instance_nixl_agent = None
+        self.remote_instance_transfer_engine_agent_metadata = None  # bytes, NIXL only
         self.parallelism_config = None
         # auxiliary hidden capture mode. TODO: expose this to server args?
         self.eagle_use_aux_hidden_state = False
@@ -527,13 +530,25 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if (
             self.server_args.remote_instance_weight_loader_use_transfer_engine()
-            and self.remote_instance_transfer_engine is not None
+            and (
+                self.remote_instance_transfer_engine is not None
+                or self.remote_instance_nixl_agent is not None
+            )
             and self.remote_instance_transfer_engine_weight_info is None
         ):
-            # Register memory and upstream the transfer engine info to the bootstrap server
-            self.remote_instance_transfer_engine_weight_info = register_memory_region(
-                self.model, self.remote_instance_transfer_engine
-            )
+            # Register memory and publish metadata to the bootstrap server.
+            if self.remote_instance_nixl_agent is not None:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region_nixl(
+                        self.model, self.remote_instance_nixl_agent, self.gpu_id
+                    )
+                )
+            else:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region(
+                        self.model, self.remote_instance_transfer_engine
+                    )
+                )
             self._register_to_engine_info_bootstrap()
 
         # Register parallelism config with the bootstrap server
@@ -711,6 +726,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
     def remote_instance_init_transfer_engine(self):
+        backend = self.server_args.remote_instance_weight_loader_backend
+        is_nixl_seed = self.server_args.remote_instance_weight_loader_start_seed_via_nixl
+        if is_nixl_seed or backend == RemoteInstanceWeightLoaderBackend.NIXL:
+            self._remote_instance_init_nixl()
+            return
+
         try:
             from mooncake.engine import TransferEngine
         except ImportError as e:
@@ -727,6 +748,32 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine_session_id = NetworkAddress(
             local_ip, self.remote_instance_transfer_engine.get_rpc_port()
         ).to_host_port_str()
+
+    def _remote_instance_init_nixl(self):
+        import uuid
+
+        try:
+            from nixl._api import nixl_agent, nixl_agent_config
+        except ImportError:
+            logger.warning(
+                "Please install NIXL by following the instructions at "
+                "https://github.com/ai-dynamo/nixl/blob/main/README.md "
+                "to use NIXL as remote instance weight loader backend."
+            )
+            return
+
+        backend = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND.get()
+        agent_config = nixl_agent_config(backends=[backend], num_threads=0)
+        self.remote_instance_nixl_agent = nixl_agent(str(uuid.uuid4()), agent_config)
+        # Export agent metadata so Miles can call add_remote_agent() on its side.
+        # SGLang does not call add_remote_agent() back; Miles handles the handshake.
+        self.remote_instance_transfer_engine_agent_metadata = (
+            self.remote_instance_nixl_agent.get_agent_metadata()
+        )
+        logger.info(
+            f"NIXL weight agent initialized for tp_rank={self.tp_rank}, "
+            f"backend={backend}, agent_name={self.remote_instance_nixl_agent.name}"
+        )
 
     def _register_to_engine_info_bootstrap(self):
         """Register transfer engine info with the EngineInfoBootstrapServer via HTTP PUT.
@@ -848,17 +895,37 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         The bootstrap server runs on node_rank==0. For multi-node setups, the
         host is derived from dist_init_addr. For single-node, use 127.0.0.1.
         """
+        import base64
+
         import requests as http_requests
 
         bootstrap_url = self._get_bootstrap_url()
         url = f"{bootstrap_url}/register_transfer_engine_info"
 
-        payload = {
-            "tp_rank": self.tp_rank,
-            "transfer_engine_info": {
+        backend = self.server_args.remote_instance_weight_loader_backend
+        is_nixl_seed = self.server_args.remote_instance_weight_loader_start_seed_via_nixl
+
+        if is_nixl_seed or backend == RemoteInstanceWeightLoaderBackend.NIXL:
+            # NIXL tagged dict: Miles reads agent_metadata, calls add_remote_agent(),
+            # then issues WRITE transfers. SGLang does not call add_remote_agent() back.
+            transfer_engine_info = {
+                "backend": "nixl",
+                "agent_name": self.remote_instance_nixl_agent.name,
+                "agent_metadata": base64.b64encode(
+                    self.remote_instance_transfer_engine_agent_metadata
+                ).decode("ascii"),
+                "weights_info_dict": self.remote_instance_transfer_engine_weight_info,
+            }
+        else:
+            transfer_engine_info = {
+                "backend": "mooncake",
                 "session_id": self.remote_instance_transfer_engine_session_id,
                 "weights_info_dict": self.remote_instance_transfer_engine_weight_info,
-            },
+            }
+
+        payload = {
+            "tp_rank": self.tp_rank,
+            "transfer_engine_info": transfer_engine_info,
         }
 
         try:

@@ -16,6 +16,7 @@ class RemoteInstanceWeightLoaderBackend(str, enum.Enum):
     NCCL = "nccl"
     TRANSFER_ENGINE = "transfer_engine"
     MODELEXPRESS = "modelexpress"
+    NIXL = "nixl"
 
 
 def trigger_init_weights_send_group_for_remote_instance_request(
@@ -92,7 +93,12 @@ def get_remote_instance_transfer_engine_info_per_rank(seed_url: str, rank: int):
             data = response.json()
 
             if "remote_instance_transfer_engine_info" in data:
-                return data["remote_instance_transfer_engine_info"]
+                info = data["remote_instance_transfer_engine_info"]
+                # Tagged dict format: unpack session_id and weights_info_dict for
+                # the Mooncake transfer_engine reader path.
+                session_id = info.get("session_id")
+                weights_info_dict = info.get("weights_info_dict")
+                return session_id, weights_info_dict
             else:
                 logger.error(
                     "Failed to get `remote_instance_transfer_engine_info` in response."
@@ -191,4 +197,69 @@ def register_memory_region_v2(model, transfer_engine):
 
     end_tic = time.time()
     logger.debug(f"Register memory region v2 time: {(end_tic - start_tic):.4f}s")
+    return weight_mr_dict
+
+
+def register_memory_region_nixl(model, nixl_agent, gpu_id: int):
+    """Register model weight buffers with a NIXL agent for RDMA writes by Miles.
+
+    Reuses the v2 contiguous-block-merging logic so the agent receives one
+    register_memory call per merged segment rather than one per tensor.
+
+    Returns weight_mr_dict mapping param_name ->
+    (data_ptr, numel, element_size, device_id).
+    """
+    import torch
+
+    start_tic = time.time()
+
+    weight_mr_dict = {}
+    weight_addr_set = set()
+    for name, weight in model.named_parameters():
+        weight_mr_dict[name] = (
+            weight.data_ptr(),
+            weight.numel(),
+            weight.element_size(),
+            gpu_id,
+        )
+        weight_addr_set.add(weight.data_ptr())
+
+    # Collect contiguous merged weight blocks (same logic as register_memory_region_v2).
+    memory_snapshot = torch.cuda.memory.memory_snapshot()
+    addrs = []
+    for segment in memory_snapshot:
+        current_weight_block = None
+        blocks = segment.get("blocks", [])
+        for block in blocks:
+            address = block.get("address", -1)
+            size = block.get("size", -1)
+            state = block.get("state", "")
+            if address < 0 or size < 0 or state == "":
+                continue
+            if state == "active_allocated":
+                if address in weight_addr_set:
+                    if current_weight_block is None:
+                        current_weight_block = (address, size)
+                    elif current_weight_block[0] + current_weight_block[1] == address:
+                        current_weight_block = (
+                            current_weight_block[0],
+                            current_weight_block[1] + size,
+                        )
+                    else:
+                        addrs.append(
+                            (current_weight_block[0], current_weight_block[1], gpu_id, "")
+                        )
+                        current_weight_block = (address, size)
+        if current_weight_block is not None:
+            addrs.append((current_weight_block[0], current_weight_block[1], gpu_id, ""))
+
+    descs = nixl_agent.register_memory(addrs, "VRAM")
+    if not descs:
+        raise RuntimeError("NIXL memory registration failed for weight buffers")
+
+    # Keep descriptors alive on the agent for process lifetime (design doc §7 Q2).
+    nixl_agent._weight_descs = descs
+
+    end_tic = time.time()
+    logger.debug(f"Register memory region (NIXL) time: {(end_tic - start_tic):.4f}s")
     return weight_mr_dict

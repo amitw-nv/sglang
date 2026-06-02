@@ -720,9 +720,10 @@ class ServerArgs:
     remote_instance_weight_loader_seed_instance_service_port: Optional[int] = None
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
     remote_instance_weight_loader_backend: Literal[
-        "transfer_engine", "nccl", "modelexpress"
+        "transfer_engine", "nccl", "modelexpress", "nixl"
     ] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: bool = False
+    remote_instance_weight_loader_start_seed_via_nixl: bool = False
     engine_info_bootstrap_port: int = 6789
     modelexpress_config: Optional[str] = None
 
@@ -3224,12 +3225,24 @@ class ServerArgs:
                     "Fallback load_format to 'auto' due to 'transfer_engine' backend is not supported."
                 )
                 self.load_format = "auto"
+            elif (
+                self.remote_instance_weight_loader_backend == "nixl"
+                and not self.validate_nixl()
+            ):
+                logger.warning(
+                    "Fallback load_format to 'auto' due to 'nixl' backend is not supported."
+                )
+                self.load_format = "auto"
 
         # Check whether TransferEngine can be used when users want to start seed service that supports TransferEngine backend.
         if self.remote_instance_weight_loader_start_seed_via_transfer_engine:
             self.remote_instance_weight_loader_start_seed_via_transfer_engine = (
                 self.validate_transfer_engine()
             )
+
+        # Check whether NIXL can be used when users want to start seed service via NIXL backend.
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
+            self.remote_instance_weight_loader_start_seed_via_nixl = self.validate_nixl()
 
     def _is_mistral_native_format(self) -> bool:
         """Detect if the model uses Mistral native format (params.json + consolidated weights).
@@ -5904,14 +5917,21 @@ class ServerArgs:
         parser.add_argument(
             "--remote-instance-weight-loader-backend",
             type=str,
-            choices=["transfer_engine", "nccl", "modelexpress"],
+            choices=["transfer_engine", "nccl", "modelexpress", "nixl"],
             default=ServerArgs.remote_instance_weight_loader_backend,
-            help="The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', or 'modelexpress'. Default is 'nccl'.",
+            help="The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', 'modelexpress', or 'nixl'. Default is 'nccl'.",
         )
         parser.add_argument(
             "--remote-instance-weight-loader-start-seed-via-transfer-engine",
             action="store_true",
             help="Start seed server via transfer engine backend for remote instance weight loader.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-start-seed-via-nixl",
+            action="store_true",
+            help="Start seed server via NIXL backend for remote instance weight loader. "
+            "Registers weight buffers with a NIXL agent and publishes metadata for "
+            "external engines (e.g. Miles) to RDMA-write updated weights.",
         )
         parser.add_argument(
             "--engine-info-bootstrap-port",
@@ -6509,6 +6529,19 @@ class ServerArgs:
         else:
             return True
 
+    def validate_nixl(self):
+        try:
+            nixl_available = importlib.util.find_spec("nixl._api") is not None
+        except (ModuleNotFoundError, ValueError):
+            nixl_available = False
+        if not nixl_available:
+            logger.warning(
+                "Failed to import nixl._api. Does not support using NIXL as remote instance weight loader backend. "
+                "Install NIXL by following https://github.com/ai-dynamo/nixl/blob/main/README.md"
+            )
+            return False
+        return True
+
     @property
     def _parsed_modelexpress_config(self) -> dict:
         cache = getattr(self, "_mx_config_cache", None)
@@ -6539,14 +6572,17 @@ class ServerArgs:
         # Use TransferEngine as seed backend.
         if self.remote_instance_weight_loader_start_seed_via_transfer_engine:
             return True
+        # Use NIXL as seed backend.
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
+            return True
         # ModelExpress source mode also needs TransferEngine init.
         if self.modelexpress_source:
             return True
-        # Use TransferEngine as client backend.
+        # Use TransferEngine or NIXL as client backend.
         elif (
             self.load_format == "remote_instance"
             and self.remote_instance_weight_loader_backend
-            in ("transfer_engine", "modelexpress")
+            in ("transfer_engine", "modelexpress", "nixl")
         ):
             return True
         else:

@@ -73,8 +73,10 @@ Per touch point, the smallest change that makes NIXL work. Nothing is duplicated
 ### 4.1 Backend enum + arg (tiny)
 - Add `NIXL = "nixl"` to `RemoteInstanceWeightLoaderBackend`.
 - Add `"nixl"` to the `remote_instance_weight_loader_backend` `Literal` in `server_args.py`.
-- Make `remote_instance_weight_loader_use_transfer_engine()` (and the seed-start gating) treat `nixl` like
-  `transfer_engine` so the engine gets initialized on the seed.
+- Add `--remote-instance-weight-loader-start-seed-via-nixl` bool flag (analogous to the existing
+  `--remote-instance-weight-loader-start-seed-via-transfer-engine`). This is the trigger for NIXL seed mode.
+- Extend `remote_instance_weight_loader_use_transfer_engine()` to return `True` when either
+  `remote_instance_weight_loader_start_seed_via_nixl` is set or `backend == "nixl"`.
 
 ### 4.2 Agent init on the worker (branch in one method)
 - In `ModelRunner.remote_instance_init_transfer_engine()`, branch on backend:
@@ -143,15 +145,15 @@ xfers against the `(addr, size, device_id)` descriptors.
 - Sharding, all-gather, dtype/`convert_to_hf`, CPU staging — all on the Miles side.
 - ModelExpress backend.
 
-## 7. Open questions / risks
+## 7. Open questions / risks — resolved
 
 - **Q1 — Decommission / re-register on weight realloc.** If SGLang reallocates weight memory (e.g. quant
   swap, CUDA-graph recapture), registered descriptors go stale and metadata must be re-published. The
   Mooncake path has the same hazard; confirm Miles re-queries the endpoint each round.
-- **Q2 — Agent lifetime & teardown.** Need to decide when the NIXL agent / descriptors are released
-  (process exit vs. explicit deregister). Minimal version: keep for process lifetime.
-- **Q3 — Bidirectional metadata.** For pure WRITE-from-Miles, SGLang only needs to *export* its metadata; it
-  does not need Miles' agent metadata. Confirm Miles does not require SGLang to `add_remote_agent` back. If it
-  does, we need a small inbound endpoint (extra delta).
-- **Q4 — Backend transport default.** Confirm whether reusing `SGLANG_DISAGGREGATION_NIXL_BACKEND` is
-  acceptable or a dedicated `SGLANG_WEIGHT_NIXL_BACKEND` is preferred.
+- **Q2 — Agent lifetime & teardown.** **Decision: keep for process lifetime.** Descriptors are pinned on the
+  agent object (`nixl_agent._weight_descs`) and released only on process exit.
+- **Q3 — Bidirectional metadata.** **Decision: SGLang is export-only.** Miles reads `agent_metadata` from
+  the HTTP endpoint, calls `add_remote_agent()` on its side, and issues WRITE transfers. SGLang does not call
+  `add_remote_agent()` back. A comment in `_remote_instance_init_nixl()` documents this assumption.
+- **Q4 — Backend transport default.** **Decision: reuse `SGLANG_DISAGGREGATION_NIXL_BACKEND`.** No new env
+  var is added; the same UCX default applies to both disaggregation and weight transfer.
