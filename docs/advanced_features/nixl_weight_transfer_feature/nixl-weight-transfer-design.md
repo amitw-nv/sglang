@@ -13,6 +13,22 @@ SGLang is the **passive target**. It does two things and nothing else:
 
 The actual data movement (descriptor build, `transfer`, completion poll) happens in **Miles/NIXL**, not in SGLang.
 
+### How it is launched
+
+Miles owns the entry point. It installs SGLang in-place from the `sglang-miles` branch
+(`pip install -e "python[all]" --no-deps`) and starts the whole flow through its own launcher,
+`examples/p2p_weight_transfer/run.py`. That launcher boots the SGLang seed itself — the operator never
+calls `sglang.launch_server` directly. The NIXL path is selected with `--mode nixl`:
+
+```bash
+python examples/p2p_weight_transfer/run.py run <model> --mode nixl
+```
+
+Under the hood `run.py` launches the SGLang seed with
+`--remote-instance-weight-loader-start-seed-via-nixl` and then runs the Miles NIXL peer that performs the
+RDMA writes. So the design below describes what SGLang must do when `run.py` starts it in `nixl` mode; the
+flag is an internal contract between Miles and SGLang, not something the user sets by hand.
+
 This is intentionally **not** R-Fork (SGL-to-SGL pull). We are only reusing the *plumbing* that the existing
 `transfer_engine` (Mooncake) backend already established, because that plumbing already does buffer
 registration + metadata export. We add the smallest possible delta on top of it.
