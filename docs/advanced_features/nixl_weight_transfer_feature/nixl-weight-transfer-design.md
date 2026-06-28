@@ -29,7 +29,7 @@ Under the hood `run.py` launches the SGLang seed with
 RDMA writes. So the design below describes what SGLang must do when `run.py` starts it in `nixl` mode; the
 flag is an internal contract between Miles and SGLang, not something the user sets by hand.
 
-This is intentionally **not** R-Fork (SGL-to-SGL pull). We are only reusing the *plumbing* that the existing
+We are only reusing the *plumbing* that the existing
 `transfer_engine` (Mooncake) backend already established, because that plumbing already does buffer
 registration + metadata export. We add the smallest possible delta on top of it.
 
@@ -81,6 +81,35 @@ We get all of this for free and reuse it:
   `/remote_instance_transfer_engine_info` endpoint (`entrypoints/http_server.py`).
 
 The peer (Miles, today Mooncake) reads that endpoint, learns `session_id` + buffer pointers, and writes.
+
+### 3.1 Block-by-block: each Mooncake API and the NIXL parallel we must provide
+
+The table below walks the weight-transfer pipeline stage by stage. The "Mooncake API" column is what the
+existing `transfer_engine` backend does today; the "NIXL parallel" column is what we have to implement to
+satisfy the same contract. The middle stages (publish + serve) are **shared SGLang plumbing** — only the
+*payload* widens; the HTTP path itself does not change.
+
+| # | Pipeline block | Mooncake API (exists) | NIXL parallel (to add) | Who owns it |
+|---|---|---|---|---|
+| 1 | Engine/agent object | `TransferEngine()` | `nixl_agent(uuid, nixl_agent_config(...))` | SGLang worker |
+| 2 | Connection identity | `initialize(ip, "P2PHANDSHAKE", "rdma", dev)` → `session_id` host:port string; handshake is implicit | `agent_name` (uuid) + `agent.get_agent_metadata()` opaque blob; peer must explicitly `add_remote_agent` | SGLang worker |
+| 3 | Buffer registration | `engine.register_memory(addr, size)` per merged block | `agent.register_memory([(addr, size, gpu_id, "")], "VRAM")`, keep returned `descs` alive | SGLang worker |
+| 4 | Per-tensor descriptors | `weights_info_dict[name] = (addr, numel, element_size)` | same, plus `device_id`: `(addr, numel, element_size, device_id)` | SGLang worker |
+| 5 | Metadata publish | PUT `{session_id, weights_info_dict}` | PUT `{backend, agent_name, agent_metadata(b64), weights_info_dict}` | SGLang worker + bootstrap |
+| 6 | Metadata serve | `/remote_instance_transfer_engine_info` | **identical path**, value is now a tagged dict | Shared HTTP (no change) |
+| 7 | Data movement | `batch_transfer_sync_write/read(session_id, local, remote, lens)` | `add_remote_agent` → `get_xfer_descs` → `initialize_xfer("WRITE", …)` → `transfer()` + poll | Miles peer (no SGLang code) |
+
+**Reading the map.** Stages 1–4 run inside the SGLang worker (`ModelRunner`); stages 5–6 are the shared
+registry/HTTP plumbing; stage 7 happens entirely on the Miles peer. SGLang is the passive target, so the
+only blocks we *write new code for* are the NIXL variants of stages 1–5. Stages 6 and 7 need no SGLang
+work — the endpoint path is reused verbatim, and the transfer itself is Miles' job.
+
+The crux of the difference is stage 2: Mooncake folds connection identity into a single self-describing
+`session_id` string and handshakes implicitly over `P2PHANDSHAKE`, whereas NIXL splits identity into an
+`agent_name` plus an opaque `agent_metadata` blob that the *peer* must register via `add_remote_agent`
+before any transfer. That is why the metadata schema in §5 must carry the base64 `agent_metadata` — it is
+the one unavoidable change (assumption **A6**). Everything else is a 1:1 substitution of the API call
+inside an already-existing block.
 
 ## 4. Minimal delta for NIXL
 
