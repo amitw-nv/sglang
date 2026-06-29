@@ -15,7 +15,7 @@ PARTITION=interactive
 TIME=02:00:00
  
 USER_TRIMMED=$USER
-BASEDIR=/home/$USER/lustre/
+BASEDIR=/lustre/fsw/portfolios/network/users/$USER/
 WORKSPACE=/sgl-workspace/
 SUBPROJECT=weight_transfer
 JOB_NAME=$PORTFOLIO-$SUBPROJECT.dev
