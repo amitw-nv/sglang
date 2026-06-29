@@ -81,6 +81,11 @@ def trigger_transferring_weights_request(
 
 
 def get_remote_instance_transfer_engine_info_per_rank(seed_url: str, rank: int):
+    """Fetch the per-rank transfer engine info from the seed.
+
+    Returns the backend-tagged info dict on success (e.g. Mooncake:
+    {"session_id", "weights_info_dict"}), or None on any failure.
+    """
     try:
         response = requests.get(
             f"{seed_url}/get_remote_instance_transfer_engine_info",
@@ -98,13 +103,13 @@ def get_remote_instance_transfer_engine_info_per_rank(seed_url: str, rank: int):
                 logger.error(
                     "Failed to get `remote_instance_transfer_engine_info` in response."
                 )
-                return None, None
+                return None
         else:
             logger.error(f"request.get failed: {response.status_code}")
-            return None, None
+            return None
     except Exception as e:
         logger.error(f"Exception: {e}")
-        return None, None
+        return None
 
 
 def register_memory_region(model, transfer_engine):

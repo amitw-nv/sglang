@@ -32,13 +32,19 @@ python -c "from sglang.srt.server_args import ServerArgs; a = ServerArgs.__datac
 
 ### Step 2 — Bootstrap server schema migration
 
-**File:** `engine_info_bootstrap_server.py`
+**Files:** `engine_info_bootstrap_server.py`, `remote_instance_weight_loader_utils.py`, `loader.py`
 
 - Change storage from `Dict[int, Tuple]` → `Dict[int, dict]`.
 - PUT handler stores the tagged dict as-is (no positional unpacking).
 - GET handler returns the dict directly (remove `list()` wrapper).
+- Update the reader consumer so the existing Mooncake pull path survives the schema change:
+  - `get_remote_instance_transfer_engine_info_per_rank()` returns a single info dict on success and
+    `None` on failure (instead of a positional 2-tuple / `None, None`).
+  - `load_model_from_remote_instance_by_transfer_engine()` reads `session_id` / `weights_info_dict`
+    *by key* instead of positional unpacking.
 
 This is backend-neutral — the Mooncake path still works, just with a tagged dict instead of a tuple.
+(The reader update is a schema-compatibility tweak only; no NIXL read logic is added — see design §4.5.)
 
 **Test:** Start with the existing Mooncake backend and hit the info endpoint:
 ```bash
@@ -46,7 +52,8 @@ python -m sglang.launch_server --model-path <model> \
   --remote-instance-weight-loader-backend transfer_engine \
   --remote-instance-weight-loader-start-seed-via-transfer-engine &
 curl "http://localhost:30000/remote_instance_transfer_engine_info?rank=0"
-# response should now be a dict with a "backend" key instead of a bare array
+# response should now be a dict (e.g. {"session_id": ..., "weights_info_dict": {...}})
+# instead of a bare array. The "backend" tag is added later in Step 5.
 ```
 
 ---

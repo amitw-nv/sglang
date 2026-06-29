@@ -144,8 +144,14 @@ Per touch point, the smallest change that makes NIXL work. Nothing is duplicated
 ### 4.4 Metadata schema (the one real change) — see §5.
 
 ### 4.5 Receiver path
-- **No change / not added.** SGLang does not read. The R-Fork
-  `load_model_from_remote_instance_by_transfer_engine` reader stays Mooncake-only and untouched.
+- **No NIXL reader added.** SGLang still does not read/pull weights for the NIXL feature — Miles performs
+  the WRITE. No NIXL-specific read logic is introduced.
+- **Schema-compatibility update only.** Because the registry value migrates from a positional
+  `(session_id, weights_info_dict)` tuple to a backend-tagged dict (§5), the existing Mooncake R-Fork
+  reader `load_model_from_remote_instance_by_transfer_engine` is updated to read `session_id` /
+  `weights_info_dict` *by key* instead of positional unpacking (and
+  `get_remote_instance_transfer_engine_info_per_rank()` now returns a single dict / `None`). This is the
+  minimum needed to keep the Mooncake pull path working under the new schema.
 
 ## 5. The metadata schema change (the crux)
 
@@ -186,7 +192,8 @@ xfers against the `(addr, size, device_id)` descriptors.
 
 - The broadcast / tensor update paths (`update_weights_from_distributed`, `update_weights_from_tensor`,
   `init_weights_update_group`, `init_weights_send_group_for_remote_instance`) — NCCL/IPC, no transfer engine.
-- R-Fork SGL-to-SGL pull/reader path.
+- R-Fork SGL-to-SGL pull/reader path — no NIXL read logic is added. The reader only receives a
+  schema-compatibility tweak to consume the tagged dict (see §4.5).
 - Sharding, all-gather, dtype/`convert_to_hf`, CPU staging — all on the Miles side.
 - ModelExpress backend.
 
