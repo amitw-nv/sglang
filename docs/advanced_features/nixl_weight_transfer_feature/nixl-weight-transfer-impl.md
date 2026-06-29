@@ -16,6 +16,9 @@ Each step is independently testable without Miles. Complete them in order.
 - Add `"nixl"` to the `remote_instance_weight_loader_backend` `Literal` and argparse `choices`.
 - Add `remote_instance_weight_loader_start_seed_via_nixl: bool = False` field and `--remote-instance-weight-loader-start-seed-via-nixl` CLI flag.
 - Add `validate_nixl()`: check `nixl._api` is importable.
+- In `__post_init__`, gate the new seed flag on `validate_nixl()` (mirrors the existing
+  `remote_instance_weight_loader_start_seed_via_transfer_engine` validation block): if NIXL isn't
+  importable, the flag is reset to `False` so the seed falls back gracefully.
 - Extend `remote_instance_weight_loader_use_transfer_engine()` to return `True` for the new flag or `backend == "nixl"`.
 
 **Test:**
