@@ -24,6 +24,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
@@ -356,6 +357,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
         self.remote_instance_transfer_engine_weight_info = None
+        self.remote_instance_nixl_agent = None
+        self.remote_instance_transfer_engine_agent_metadata = None
         self.parallelism_config = None
         # auxiliary hidden capture mode. TODO: expose this to server args?
         self.eagle_use_aux_hidden_state = False
@@ -711,6 +714,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
     def remote_instance_init_transfer_engine(self):
+        use_nixl = (
+            self.server_args.remote_instance_weight_loader_start_seed_via_nixl
+            or self.server_args.remote_instance_weight_loader_backend == "nixl"
+        )
+        if use_nixl:
+            self._remote_instance_init_nixl()
+            return
+
         try:
             from mooncake.engine import TransferEngine
         except ImportError as e:
@@ -727,6 +738,47 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine_session_id = NetworkAddress(
             local_ip, self.remote_instance_transfer_engine.get_rpc_port()
         ).to_host_port_str()
+
+    def _remote_instance_init_nixl(self):
+        """Initialize a NIXL agent on the worker (NIXL weight-transfer backend).
+
+        SGLang is the passive, export-only target: it creates a ``nixl_agent`` and
+        captures its opaque ``agent_metadata`` blob so the metadata can be published
+        for the external peer (Miles). SGLang does NOT call ``add_remote_agent`` and
+        does NOT issue ``transfer()`` calls itself -- the peer registers SGLang's
+        agent metadata on its side and performs the RDMA WRITEs.
+        """
+        try:
+            from nixl._api import nixl_agent, nixl_agent_config
+        except ImportError as e:
+            logger.warning(
+                "Please install NIXL for using the NIXL remote instance weight "
+                "transfer backend. See "
+                "https://github.com/ai-dynamo/nixl/blob/main/README.md"
+            )
+            return
+
+        backend = envs.SGLANG_REMOTE_INSTANCE_NIXL_BACKEND.get()
+        agent_config = nixl_agent_config(backends=[backend])
+        agent_name = str(uuid.uuid4())
+        agent = nixl_agent(agent_name, agent_config)
+
+        available_plugins = agent.get_plugin_list()
+        if backend not in available_plugins:
+            raise ValueError(
+                f"NIXL backend '{backend}' not found. Available: {available_plugins}. "
+                f"Please install the required NIXL plugin or choose from: {available_plugins}"
+            )
+
+        self.remote_instance_nixl_agent = agent
+        self.remote_instance_transfer_engine_session_id = agent_name
+        self.remote_instance_transfer_engine_agent_metadata = (
+            agent.get_agent_metadata()
+        )
+        logger.info(
+            f"NIXL weight-transfer agent initialized (agent_name={agent_name}, "
+            f"backend={backend}) for tp_rank={self.tp_rank}"
+        )
 
     def _register_to_engine_info_bootstrap(self):
         """Register transfer engine info with the EngineInfoBootstrapServer via HTTP PUT.

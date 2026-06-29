@@ -57,8 +57,9 @@ These are the assumptions this design is built on. If any is wrong, the correspo
   unavoidable schema change.
 - **A7 — One agent per worker (per tp_rank).** Each `ModelRunner` owns one NIXL agent, registers its local
   shard's weights, and publishes under its `tp_rank`, mirroring how Mooncake publishes per `tp_rank`.
-- **A8 — Backend transport for NIXL** (UCX, etc.) is selected via the existing
-  `SGLANG_DISAGGREGATION_NIXL_BACKEND` env (reused) or a defaulted value; not a new required flag.
+- **A8 — Backend transport for NIXL** (UCX, etc.) is selected via a dedicated
+  `SGLANG_REMOTE_INSTANCE_NIXL_BACKEND` env (default `UCX`), scoped to weight transfer and kept separate
+  from PD-disaggregation's `SGLANG_DISAGGREGATION_NIXL_BACKEND`; not a new required flag.
 - **A9 — JSON transport for metadata.** The registry/HTTP layer is JSON, so the binary `agent_metadata` is
   base64-encoded for transport and decoded by the peer.
 
@@ -207,5 +208,6 @@ xfers against the `(addr, size, device_id)` descriptors.
 - **Q3 — Bidirectional metadata.** **Decision: SGLang is export-only.** Miles reads `agent_metadata` from
   the HTTP endpoint, calls `add_remote_agent()` on its side, and issues WRITE transfers. SGLang does not call
   `add_remote_agent()` back. A comment in `_remote_instance_init_nixl()` documents this assumption.
-- **Q4 — Backend transport default.** **Decision: reuse `SGLANG_DISAGGREGATION_NIXL_BACKEND`.** No new env
-  var is added; the same UCX default applies to both disaggregation and weight transfer.
+- **Q4 — Backend transport default.** **Decision: dedicated `SGLANG_REMOTE_INSTANCE_NIXL_BACKEND` env
+  (default `UCX`).** Weight transfer and PD-disaggregation are different features, so weight transfer gets
+  its own NIXL backend env rather than overloading `SGLANG_DISAGGREGATION_NIXL_BACKEND`.
