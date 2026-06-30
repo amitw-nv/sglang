@@ -6,6 +6,10 @@ Implements the design in `nixl-weight-transfer-design.md`.
 
 Each step is independently testable without Miles. Complete them in order.
 
+Each step below lists only its test names + what they check. The runnable commands and expected
+results live in `nixl-weight-transfer-tests.md`. The no-GPU tests for steps 1–3 are automated by
+`run_tests_steps_1_3.sh`.
+
 ---
 
 ### Step 1 — Backend enum + CLI arg
@@ -21,12 +25,10 @@ Each step is independently testable without Miles. Complete them in order.
   importable, the flag is reset to `False` so the seed falls back gracefully.
 - Extend `remote_instance_weight_loader_use_transfer_engine()` to return `True` for the new flag or `backend == "nixl"`.
 
-**Test:**
-```bash
-python -m sglang.launch_server --help | grep nixl
-# should show the new flag
-python -c "from sglang.srt.server_args import ServerArgs; a = ServerArgs.__dataclass_fields__; print('nixl' in str(a))"
-```
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **1a** — CLI flag is exposed in `--help`.
+- **1b** — `NIXL` enum value + the new dataclass field exist.
+- **1c** — `use_transfer_engine()` covers the NIXL triggers.
 
 ---
 
@@ -46,15 +48,10 @@ python -c "from sglang.srt.server_args import ServerArgs; a = ServerArgs.__datac
 This is backend-neutral — the Mooncake path still works, just with a tagged dict instead of a tuple.
 (The reader update is a schema-compatibility tweak only; no NIXL read logic is added — see design §4.5.)
 
-**Test:** Start with the existing Mooncake backend and hit the info endpoint:
-```bash
-python -m sglang.launch_server --model-path <model> \
-  --remote-instance-weight-loader-backend transfer_engine \
-  --remote-instance-weight-loader-start-seed-via-transfer-engine &
-curl "http://localhost:30000/remote_instance_transfer_engine_info?rank=0"
-# response should now be a dict (e.g. {"session_id": ..., "weights_info_dict": {...}})
-# instead of a bare array. The "backend" tag is added later in Step 5.
-```
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **2a** — bootstrap server stores/serves the tagged dict as-is (no list-wrapping).
+- **2b** — reader returns a single dict / `None` by key (not a positional 2-tuple).
+- **2c** — Mooncake path still returns a JSON object end-to-end (backend-neutral regression).
 
 ---
 
@@ -66,12 +63,9 @@ curl "http://localhost:30000/remote_instance_transfer_engine_info?rank=0"
 - In `remote_instance_init_transfer_engine()`, branch at entry: if NIXL seed or `backend == "nixl"`, call `_remote_instance_init_nixl()` and return; otherwise run the existing Mooncake path unchanged.
 - `_remote_instance_init_nixl()`: construct `nixl_agent` (same pattern as `disaggregation/nixl/conn.py`), capture `get_agent_metadata()` bytes. SGLang is export-only — Miles handles `add_remote_agent`.
 
-**Test:** Server reaches ready state with no worker crash:
-```bash
-python -m sglang.launch_server --model-path <model> \
-  --remote-instance-weight-loader-start-seed-via-nixl
-# check logs: no exception in ModelRunner.initialize(), worker process stays alive
-```
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **3a** — `remote_instance_init_transfer_engine()` branches to `_remote_instance_init_nixl()`.
+- **3b** — server reaches ready state with no worker crash; "agent initialized" log appears.
 
 ---
 
@@ -82,7 +76,9 @@ python -m sglang.launch_server --model-path <model> \
 - Add `register_memory_region_nixl(model, nixl_agent, gpu_id)`: build `weights_info_dict[name] = (data_ptr, numel, element_size, gpu_id)` and register merged contiguous VRAM blocks with `agent.register_memory([(addr, size, gpu_id, "")], "VRAM")`.
 - In `model_runner.py` `initialize()`, branch the memory-registration block on whether `remote_instance_nixl_agent` or `remote_instance_transfer_engine` is set.
 
-**Test:** Same launch as step 3; verify no CUDA errors appear in logs and the process stays healthy after the registration block completes.
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **4a** — `register_memory_region_nixl` exists and builds 4-field (`+gpu_id`) entries.
+- **4b** — same launch as step 3; no CUDA errors, process healthy after registration.
 
 ---
 
@@ -101,11 +97,9 @@ python -m sglang.launch_server --model-path <model> \
   ```
 - Base64-encode `agent_metadata` for JSON transport.
 
-**Test:** Query the endpoint and verify all fields are present:
-```bash
-curl "http://localhost:30000/remote_instance_transfer_engine_info?rank=0" | python -m json.tool
-# expect: backend=nixl, agent_name, agent_metadata (non-empty string), weights_info_dict
-```
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **5a** — publish method emits the tagged dict (`backend`/`agent_name`/`agent_metadata` b64).
+- **5b** — endpoint serves `backend=nixl`, `agent_name`, non-empty `agent_metadata`, 4-field `weights_info_dict`.
 
 ---
 
@@ -115,5 +109,7 @@ curl "http://localhost:30000/remote_instance_transfer_engine_info?rank=0" | pyth
 
 - Add `remote_instance_weight_loader_start_seed_via_nixl` to the bootstrap server startup condition (alongside the existing transfer-engine flag).
 
-**Test:** The step 5 `curl` command succeeds — this confirms the bootstrap server started and the endpoint is reachable.
+**Tests** (details in `nixl-weight-transfer-tests.md`):
+- **6a** — engine startup condition references the NIXL seed flag.
+- **6b** — the step 5 `curl` succeeds, confirming the bootstrap server started and the endpoint is reachable.
 
