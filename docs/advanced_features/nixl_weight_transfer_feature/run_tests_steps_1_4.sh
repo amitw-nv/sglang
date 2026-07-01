@@ -1,15 +1,15 @@
 #!/bin/bash
-# Runner for NIXL weight-transfer tests, steps 1-3.
+# Runner for NIXL weight-transfer tests, steps 1-4.
 # See nixl-weight-transfer-tests.md for the full description of each test.
 #
-# By default runs only the no-GPU tests (1a,1b,1c,2a,2b,3a).
-# Pass --with-e2e to also run the launch-based tests (2c Mooncake, 3b NIXL),
-# which require GPUs + the DeepSeek-V3-Lite model (+ NIXL/UCX for 3b).
+# By default runs only the no-GPU tests (1a,1b,1c,2a,2b,3a,4a).
+# Pass --with-e2e to also run the launch-based tests (2c Mooncake, 3b+4b NIXL),
+# which require GPUs + the DeepSeek-V3-Lite model (+ NIXL/UCX for 3b/4b).
 #
 # Usage:
-#   ./run_tests_steps_1_3.sh                 # no-GPU tests only
-#   ./run_tests_steps_1_3.sh --with-e2e      # also run 2c + 3b
-#   MODEL_PATH=/path/to/model ./run_tests_steps_1_3.sh --with-e2e
+#   ./run_tests_steps_1_4.sh                 # no-GPU tests only
+#   ./run_tests_steps_1_4.sh --with-e2e      # also run 2c + 3b + 4b
+#   MODEL_PATH=/path/to/model ./run_tests_steps_1_4.sh --with-e2e
 
 set -u
 
@@ -57,7 +57,7 @@ run_shell() {
 }
 
 echo "================================================================"
-echo "NIXL weight-transfer tests: steps 1-3"
+echo "NIXL weight-transfer tests: steps 1-4"
 echo "with_e2e=$WITH_E2E  model=$MODEL_PATH  tp=$TP"
 echo "================================================================"
 
@@ -117,6 +117,17 @@ assert hasattr(ModelRunner, "_remote_instance_init_nixl")
 print("OK: nixl branch present")
 '
 
+# ---------------- Step 4 ----------------
+run_py "4a" "register_memory_region_nixl exists and builds 4-field entries" '
+import inspect
+from sglang.srt.model_loader import remote_instance_weight_loader_utils as u
+assert hasattr(u, "register_memory_region_nixl")
+src = inspect.getsource(u.register_memory_region_nixl)
+assert "register_memory" in src and "VRAM" in src
+assert "gpu_id" in src
+print("OK: register_memory_region_nixl present")
+'
+
 # ---------------- e2e (optional) ----------------
 # launch_and_check <test-id> <desc> <log-grep-success-regex> <extra launch args...>
 launch_and_check() {
@@ -163,6 +174,54 @@ launch_and_check() {
     fi
 }
 
+# launch_and_check_nixl: one NIXL seed launch that covers both 3b (agent init) and
+# 4b (memory registration ran without CUDA faults / process healthy). Tests 3b and 4b
+# share the exact same launch, so we run it once and record both results from one log.
+launch_and_check_nixl() {
+    echo "----------------------------------------------------------------"
+    echo "[3b/4b] NIXL agent init + memory registration (single launch)"
+    local log; log="$(mktemp)"
+    echo "  launching server (log: $log) ..."
+    python -m sglang.launch_server \
+        --model-path "$MODEL_PATH" --tp "$TP" --trust-remote-code --port "$PORT" \
+        --remote-instance-weight-loader-start-seed-via-nixl >"$log" 2>&1 &
+    local pid=$!
+    local waited=0 ok=0
+    while [ "$waited" -lt "$READY_TIMEOUT" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "  server process exited early"; break
+        fi
+        if grep -q "ready to roll" "$log"; then ok=1; break; fi
+        if grep -qE "OutOfMemoryError|Scheduler hit an exception|Received sigquit" "$log"; then
+            echo "  detected crash in log"; break
+        fi
+        sleep 5; waited=$((waited+5))
+    done
+
+    # 3b: agent-init log line present.
+    if grep -qE "NIXL weight-transfer agent initialized" "$log"; then
+        echo "  [3b] -> $(green PASS) (agent initialized log found)"
+        PASS=$((PASS+1)); RESULTS+=("PASS  3b  NIXL agent init")
+    else
+        echo "  [3b] -> $(red FAIL) (no agent initialized log)"
+        FAIL=$((FAIL+1)); RESULTS+=("FAIL  3b  NIXL agent init")
+    fi
+
+    # 4b: server reached ready (registration ran) and no CUDA / registration faults.
+    if [ "$ok" -eq 1 ] && ! grep -qE "CUDA error|NIXL memory registration failed|register memory failed" "$log"; then
+        echo "  [4b] -> $(green PASS) (ready, no registration/CUDA faults)"
+        PASS=$((PASS+1)); RESULTS+=("PASS  4b  NIXL memory registration")
+    else
+        echo "  [4b] -> $(red FAIL) (not ready or CUDA/registration fault in log)"
+        FAIL=$((FAIL+1)); RESULTS+=("FAIL  4b  NIXL memory registration")
+    fi
+
+    echo "  endpoint:"; curl -s "http://localhost:$PORT/remote_instance_transfer_engine_info?rank=0" | python -m json.tool || true
+
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    echo "  (full log kept at $log)"
+}
+
 if [ "$WITH_E2E" -eq 1 ]; then
     echo "================================================================"
     echo "Running e2e launch tests (needs GPUs + model)"
@@ -174,15 +233,14 @@ if [ "$WITH_E2E" -eq 1 ]; then
         --remote-instance-weight-loader-backend transfer_engine \
         --remote-instance-weight-loader-start-seed-via-transfer-engine
 
-    # 3b - NIXL agent init; gate on nixl importability first
+    # 3b + 4b - NIXL agent init + memory registration; gate on nixl importability first
     if python -c "import nixl._api" 2>/dev/null; then
-        launch_and_check "3b" "NIXL agent init, server ready, no crash" \
-            "NIXL weight-transfer agent initialized" \
-            --remote-instance-weight-loader-start-seed-via-nixl
+        launch_and_check_nixl
     else
         echo "----------------------------------------------------------------"
-        echo "[3b] SKIPPED - 'import nixl._api' failed (flag would be reset to False)"
+        echo "[3b/4b] SKIPPED - 'import nixl._api' failed (flag would be reset to False)"
         RESULTS+=("SKIP  3b  NIXL not importable")
+        RESULTS+=("SKIP  4b  NIXL not importable")
     fi
 fi
 

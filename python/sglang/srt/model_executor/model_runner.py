@@ -150,6 +150,7 @@ from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
 from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
     RemoteInstanceWeightLoaderBackend,
     register_memory_region,
+    register_memory_region_nixl,
     trigger_init_weights_send_group_for_remote_instance_request,
 )
 from sglang.srt.model_loader.utils import set_default_torch_dtype
@@ -530,13 +531,27 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if (
             self.server_args.remote_instance_weight_loader_use_transfer_engine()
-            and self.remote_instance_transfer_engine is not None
             and self.remote_instance_transfer_engine_weight_info is None
-        ):
-            # Register memory and upstream the transfer engine info to the bootstrap server
-            self.remote_instance_transfer_engine_weight_info = register_memory_region(
-                self.model, self.remote_instance_transfer_engine
+            and (
+                self.remote_instance_nixl_agent is not None
+                or self.remote_instance_transfer_engine is not None
             )
+        ):
+            # Register memory and upstream the transfer engine info to the bootstrap server.
+            # Branch on which backend's engine/agent was initialized in
+            # remote_instance_init_transfer_engine().
+            if self.remote_instance_nixl_agent is not None:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region_nixl(
+                        self.model, self.remote_instance_nixl_agent, self.gpu_id
+                    )
+                )
+            else:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region(
+                        self.model, self.remote_instance_transfer_engine
+                    )
+                )
             self._register_to_engine_info_bootstrap()
 
         # Register parallelism config with the bootstrap server

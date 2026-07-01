@@ -13,7 +13,7 @@ expected results live here.
   - *static* — source inspection, no import side effects.
   - *unit* — imports a module / spins a local HTTP server; no GPU or model.
   - *e2e* — launches a real server; needs GPU (+ model, + NIXL/UCX for the NIXL path).
-- A one-shot runner for the no-GPU tests of steps 1–3 lives at `run_tests_steps_1_3.sh`.
+- A one-shot runner for the no-GPU tests of steps 1–4 lives at `run_tests_steps_1_4.sh`.
 
 ### Prerequisite gate (run before any NIXL e2e test)
 
@@ -175,11 +175,15 @@ python -m sglang.launch_server \
 
 ---
 
-## Step 4 — Memory registration  *(acceptance test — pending implementation)*
+## Step 4 — Memory registration
 
-Status: not yet implemented. The registration block in `ModelRunner.initialize()` currently
-gates on `self.remote_instance_transfer_engine is not None`, which is `None` on the NIXL path,
-so registration is skipped for NIXL until this step lands.
+Implemented. `register_memory_region_nixl(model, nixl_agent, gpu_id)` registers the merged
+contiguous VRAM weight blocks with the NIXL agent (`agent.register_memory([...], "VRAM")`,
+keeping the returned `descs` alive on `nixl_agent._weight_descs`) and builds 4-field
+`weights_info_dict[name] = (data_ptr, numel, element_size, gpu_id)` entries. The
+registration block in `ModelRunner.initialize()` now branches: it calls
+`register_memory_region_nixl` when `remote_instance_nixl_agent` is set, and the existing
+`register_memory_region` when `remote_instance_transfer_engine` is set.
 
 ### Test 4a — `register_memory_region_nixl` exists and builds 4-field entries (static, no GPU)
 
@@ -190,19 +194,33 @@ from sglang.srt.model_loader import remote_instance_weight_loader_utils as u
 assert hasattr(u, 'register_memory_region_nixl')
 src = inspect.getsource(u.register_memory_region_nixl)
 assert 'register_memory' in src and 'VRAM' in src       # agent.register_memory([...], 'VRAM')
+assert 'gpu_id' in src                                   # 4th field widens the descriptor
 print('OK: register_memory_region_nixl present')
 "
 ```
 
-- **Checks:** the NIXL registration helper exists and registers VRAM blocks; `weights_info_dict` entries widen to `(data_ptr, numel, element_size, gpu_id)`.
+- **Checks:** the NIXL registration helper exists, registers VRAM blocks, and widens each
+  `weights_info_dict` entry to the 4-field `(data_ptr, numel, element_size, gpu_id)` tuple.
 - **Expected:** prints `OK: register_memory_region_nixl present`.
 
 ### Test 4b — no CUDA errors during/after registration (e2e, needs GPU + NIXL)
 
-Same launch as Test 3b.
+Same launch as Test 3b:
 
-- **Checks:** the memory-registration branch runs for the NIXL agent without CUDA faults and the process stays healthy after it completes.
-- **Expected:** server still reaches ready state; no `CUDA error` / `register memory failed` lines in logs; process alive after the registration block.
+```bash
+python -c "import nixl._api; print('nixl importable')"   # gate first
+python -m sglang.launch_server \
+  --model-path /sgl-workspace/llm_models/DeepSeek-V3-Lite/bf16 \
+  --tp 8 --trust-remote-code \
+  --remote-instance-weight-loader-start-seed-via-nixl
+```
+
+- **Checks:** with the Step 4 branch landed, the NIXL memory-registration block runs for the
+  NIXL agent (`register_memory_region_nixl`) without CUDA faults and the process stays healthy
+  after it completes. Unlike before Step 4, registration is no longer skipped on the NIXL path.
+- **Expected:** server still reaches `ready to roll`; no `CUDA error` / `NIXL memory registration failed`
+  lines in logs; process alive after the registration block. (The published metadata is still the
+  untagged `{session_id, weights_info_dict}` shape until Step 5 retags it.)
 
 ---
 
@@ -295,7 +313,7 @@ reachable.
 | 6a | 6 | static | no | engine startup gates on nixl flag |
 | 6b | 6 | e2e | yes (+NIXL) | endpoint reachable (200) |
 
-No-GPU tests (1a–1c, 2a–2b, 3a) are automated by `run_tests_steps_1_3.sh`. The `<model>` e2e
+No-GPU tests (1a–1c, 2a–2b, 3a, 4a) are automated by `run_tests_steps_1_4.sh`. The `<model>` e2e
 tests need the container + GPUs from `running_script.sh`; the NIXL ones additionally need NIXL +
-the UCX plugin in the image. Tests 4–6 are acceptance criteria for steps that are not yet
+the UCX plugin in the image. Tests 5–6 are acceptance criteria for steps that are not yet
 implemented and will fail until those steps land.

@@ -7,8 +7,7 @@ Implements the design in `nixl-weight-transfer-design.md`.
 Each step is independently testable without Miles. Complete them in order.
 
 Each step below lists only its test names + what they check. The runnable commands and expected
-results live in `nixl-weight-transfer-tests.md`. The no-GPU tests for steps 1–3 are automated by
-`run_tests_steps_1_3.sh`.
+results live in `nixl-weight-transfer-tests.md`.
 
 ---
 
