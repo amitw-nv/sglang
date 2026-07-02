@@ -118,7 +118,10 @@ This is backend-neutral — the Mooncake path still works, just with a tagged di
 
 **File:** `engine.py`
 
-- Add `remote_instance_weight_loader_start_seed_via_nixl` to the bootstrap server startup condition (alongside the existing transfer-engine flag).
+- Add `remote_instance_weight_loader_start_seed_via_nixl` to the bootstrap server startup condition
+  (alongside the existing transfer-engine flag), so the gate fires on either flag when
+  `node_rank == 0`. Required for Step 5's publish to land end-to-end: without it the NIXL seed launch
+  never starts the bootstrap server, the publish PUT is refused, and the endpoint returns an error.
 
 **Tests** (details in `nixl-weight-transfer-tests.md`):
 - **6a** — engine startup condition references the NIXL seed flag.

@@ -13,7 +13,7 @@ expected results live here.
   - *static* — source inspection, no import side effects.
   - *unit* — imports a module / spins a local HTTP server; no GPU or model.
   - *e2e* — launches a real server; needs GPU (+ model, + NIXL/UCX for the NIXL path).
-- A one-shot runner for the no-GPU tests of steps 1–5 lives at `run_tests_steps_1_5.sh`.
+- A one-shot runner for the no-GPU tests of steps 1–6 lives at `run_tests_steps_1_6.sh`.
 
 ### Prerequisite gate (run before any NIXL e2e test)
 
@@ -269,11 +269,14 @@ curl -s "http://localhost:30000/remote_instance_transfer_engine_info?rank=0" \
 
 ---
 
-## Step 6 — Engine startup condition  *(acceptance test — pending implementation)*
+## Step 6 — Engine startup condition
 
-Status: not yet implemented. In `engine.py` the bootstrap-server startup currently checks only
-`remote_instance_weight_loader_start_seed_via_transfer_engine`; this step adds the NIXL flag to
-that condition so the registry/HTTP server starts in NIXL seed mode.
+Implemented. In `engine.py` the bootstrap-server startup gate now fires when **either**
+`remote_instance_weight_loader_start_seed_via_transfer_engine` **or**
+`remote_instance_weight_loader_start_seed_via_nixl` is set (on `node_rank == 0`), so the
+registry/HTTP server also starts in NIXL seed mode. Without this, the NIXL seed launch never
+starts the bootstrap server, Step 5's publish PUT is refused, and the endpoint returns an
+error (this was the `KeyError: 'remote_instance_transfer_engine_info'` symptom).
 
 ### Test 6a — startup condition includes the NIXL flag (static, no GPU)
 
@@ -319,7 +322,7 @@ reachable.
 | 6a | 6 | static | no | engine startup gates on nixl flag |
 | 6b | 6 | e2e | yes (+NIXL) | endpoint reachable (200) |
 
-No-GPU tests (1a–1c, 2a–2b, 3a, 4a, 5a) are automated by `run_tests_steps_1_5.sh`. The `<model>` e2e tests need the
-container + GPUs from `running_script.sh`; the NIXL ones additionally need NIXL + the UCX plugin in
-the image. Step 5 is implemented; its e2e check (5b) shares the same NIXL launch as 3b/4b. Step 6 is
-an acceptance criterion for a step that is not yet implemented and will fail until it lands.
+No-GPU tests (1a–1c, 2a–2b, 3a, 4a, 5a, 6a) are automated by `run_tests_steps_1_6.sh`. The `<model>`
+e2e tests need the container + GPUs from `running_script.sh`; the NIXL ones additionally need NIXL +
+the UCX plugin in the image. Steps 1–6 are all implemented; the NIXL e2e checks (3b/4b/5b/6b) share a
+single NIXL seed launch, so the runner records all four from one server start.

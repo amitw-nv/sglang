@@ -1,15 +1,15 @@
 #!/bin/bash
-# Runner for NIXL weight-transfer tests, steps 1-5.
+# Runner for NIXL weight-transfer tests, steps 1-6.
 # See nixl-weight-transfer-tests.md for the full description of each test.
 #
-# By default runs only the no-GPU tests (1a,1b,1c,2a,2b,3a,4a,5a).
-# Pass --with-e2e to also run the launch-based tests (2c Mooncake, 3b+4b+5b NIXL),
-# which require GPUs + the DeepSeek-V3-Lite model (+ NIXL/UCX for 3b/4b/5b).
+# By default runs only the no-GPU tests (1a,1b,1c,2a,2b,3a,4a,5a,6a).
+# Pass --with-e2e to also run the launch-based tests (2c Mooncake, 3b+4b+5b+6b NIXL),
+# which require GPUs + the DeepSeek-V3-Lite model (+ NIXL/UCX for the NIXL path).
 #
 # Usage:
-#   ./run_tests_steps_1_5.sh                 # no-GPU tests only
-#   ./run_tests_steps_1_5.sh --with-e2e      # also run 2c + 3b + 4b + 5b
-#   MODEL_PATH=/path/to/model ./run_tests_steps_1_5.sh --with-e2e
+#   ./run_tests_steps_1_6.sh                 # no-GPU tests only
+#   ./run_tests_steps_1_6.sh --with-e2e      # also run 2c + 3b + 4b + 5b + 6b
+#   MODEL_PATH=/path/to/model ./run_tests_steps_1_6.sh --with-e2e
 
 set -u
 
@@ -57,7 +57,7 @@ run_shell() {
 }
 
 echo "================================================================"
-echo "NIXL weight-transfer tests: steps 1-5"
+echo "NIXL weight-transfer tests: steps 1-6"
 echo "with_e2e=$WITH_E2E  model=$MODEL_PATH  tp=$TP"
 echo "================================================================"
 
@@ -138,6 +138,14 @@ for key in ("backend", "agent_name", "agent_metadata", "base64"):
 print("OK: tagged nixl payload emitted")
 '
 
+# ---------------- Step 6 ----------------
+run_py "6a" "engine startup condition gates on the nixl seed flag" '
+import inspect, sglang.srt.entrypoints.engine as e
+src = inspect.getsource(e)
+assert "remote_instance_weight_loader_start_seed_via_nixl" in src
+print("OK: engine startup gates on nixl flag")
+'
+
 # ---------------- e2e (optional) ----------------
 # launch_and_check <test-id> <desc> <log-grep-success-regex> <extra launch args...>
 launch_and_check() {
@@ -185,12 +193,13 @@ launch_and_check() {
 }
 
 # launch_and_check_nixl: one NIXL seed launch that covers 3b (agent init),
-# 4b (memory registration ran without CUDA faults / process healthy), and
-# 5b (the served metadata is the tagged NIXL dict). All three share the exact
-# same launch, so we run it once and record all results from one log/endpoint.
+# 4b (memory registration ran without CUDA faults / process healthy), 5b (the
+# served metadata is the tagged NIXL dict) and 6b (the bootstrap server started
+# in NIXL seed mode, so the endpoint is reachable at all). All four share the
+# exact same launch, so we run it once and record every result from one log/endpoint.
 launch_and_check_nixl() {
     echo "----------------------------------------------------------------"
-    echo "[3b/4b/5b] NIXL agent init + memory registration + metadata publish (single launch)"
+    echo "[3b/4b/5b/6b] NIXL agent init + memory registration + metadata publish + endpoint reachable (single launch)"
     local log; log="$(mktemp)"
     echo "  launching server (log: $log) ..."
     python -m sglang.launch_server \
@@ -227,9 +236,23 @@ launch_and_check_nixl() {
         FAIL=$((FAIL+1)); RESULTS+=("FAIL  4b  NIXL memory registration")
     fi
 
-    # 5b: the served endpoint carries the full tagged NIXL identity
+    # 6b: the public endpoint is reachable (bootstrap server started in NIXL seed
+    # mode). 5b: the served payload carries the full tagged NIXL identity
     # (backend=nixl, non-empty agent_name, base64-valid agent_metadata, 4-field weights).
     echo "  endpoint:"; curl -s "http://localhost:$PORT/remote_instance_transfer_engine_info?rank=0" | python -m json.tool || true
+
+    local endpoint_reachable=0
+    if [ "$ok" -eq 1 ] && curl -s -f "http://localhost:$PORT/remote_instance_transfer_engine_info?rank=0" >/dev/null 2>&1; then
+        endpoint_reachable=1
+    fi
+    if [ "$endpoint_reachable" -eq 1 ]; then
+        echo "  [6b] -> $(green PASS) (endpoint reachable; bootstrap server started in nixl mode)"
+        PASS=$((PASS+1)); RESULTS+=("PASS  6b  NIXL endpoint reachable")
+    else
+        echo "  [6b] -> $(red FAIL) (endpoint not reachable; bootstrap server likely not started)"
+        FAIL=$((FAIL+1)); RESULTS+=("FAIL  6b  NIXL endpoint reachable")
+    fi
+
     if [ "$ok" -eq 1 ] && curl -s "http://localhost:$PORT/remote_instance_transfer_engine_info?rank=0" | python -c '
 import sys, json, base64
 d = json.load(sys.stdin)["remote_instance_transfer_engine_info"]
@@ -263,16 +286,17 @@ if [ "$WITH_E2E" -eq 1 ]; then
         --remote-instance-weight-loader-backend transfer_engine \
         --remote-instance-weight-loader-start-seed-via-transfer-engine
 
-    # 3b + 4b + 5b - NIXL agent init + memory registration + metadata publish;
-    # gate on nixl importability first
+    # 3b + 4b + 5b + 6b - NIXL agent init + memory registration + metadata publish
+    # + endpoint reachable; gate on nixl importability first
     if python -c "import nixl._api" 2>/dev/null; then
         launch_and_check_nixl
     else
         echo "----------------------------------------------------------------"
-        echo "[3b/4b/5b] SKIPPED - 'import nixl._api' failed (flag would be reset to False)"
+        echo "[3b/4b/5b/6b] SKIPPED - 'import nixl._api' failed (flag would be reset to False)"
         RESULTS+=("SKIP  3b  NIXL not importable")
         RESULTS+=("SKIP  4b  NIXL not importable")
         RESULTS+=("SKIP  5b  NIXL not importable")
+        RESULTS+=("SKIP  6b  NIXL not importable")
     fi
 fi
 
