@@ -85,16 +85,28 @@ This is backend-neutral — the Mooncake path still works, just with a tagged di
 
 **File:** `model_runner.py`
 
-- In `_register_to_engine_info_bootstrap()`, emit the tagged dict:
+- In `_register_to_engine_info_bootstrap()`, emit a backend-tagged dict, branching on whether
+  `remote_instance_nixl_agent` is set:
   ```json
+  // NIXL agent set
   {
     "backend": "nixl",
     "agent_name": "<uuid>",
     "agent_metadata": "<base64 of agent.get_agent_metadata()>",
     "weights_info_dict": { "<name>": [addr, numel, element_size, device_id] }
   }
+  // otherwise (Mooncake)
+  {
+    "backend": "mooncake",
+    "session_id": "<host:port>",
+    "weights_info_dict": { "<name>": [addr, numel, element_size] }
+  }
   ```
-- Base64-encode `agent_metadata` for JSON transport.
+- Base64-encode `agent_metadata` for JSON transport (`agent_name` reuses the existing
+  `remote_instance_transfer_engine_session_id` slot, which `_remote_instance_init_nixl()` set to the agent uuid).
+- Cleanup: `_register_to_engine_info_bootstrap()` was accidentally defined **twice** in `ModelRunner`
+  (the second shadowed the first at runtime). The dead earlier copy was removed so a single, tagged
+  definition remains.
 
 **Tests** (details in `nixl-weight-transfer-tests.md`):
 - **5a** — publish method emits the tagged dict (`backend`/`agent_name`/`agent_metadata` b64).

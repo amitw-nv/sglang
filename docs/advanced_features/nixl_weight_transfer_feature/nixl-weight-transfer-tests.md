@@ -13,7 +13,7 @@ expected results live here.
   - *static* — source inspection, no import side effects.
   - *unit* — imports a module / spins a local HTTP server; no GPU or model.
   - *e2e* — launches a real server; needs GPU (+ model, + NIXL/UCX for the NIXL path).
-- A one-shot runner for the no-GPU tests of steps 1–4 lives at `run_tests_steps_1_4.sh`.
+- A one-shot runner for the no-GPU tests of steps 1–5 lives at `run_tests_steps_1_5.sh`.
 
 ### Prerequisite gate (run before any NIXL e2e test)
 
@@ -131,7 +131,11 @@ curl -s "http://localhost:30000/remote_instance_transfer_engine_info?rank=0" | p
 ```
 
 - **Checks:** the schema migration didn't break the existing Mooncake backend (backend-neutral regression).
-- **Expected:** a JSON **object** like `{"session_id": "...:...", "weights_info_dict": {...}}` — not a bare array. The `"backend"` tag is added only in Step 5, so its absence here is expected. Requires `mooncake` importable.
+- **Expected:** a JSON **object** — not a bare array. Before Step 5 it is the untagged
+  `{"session_id": "...:...", "weights_info_dict": {...}}`; after Step 5 the Mooncake path is
+  also tagged, so it becomes `{"backend": "mooncake", "session_id": "...:...", "weights_info_dict": {...}}`.
+  Either shape passes this backend-neutral regression (the assertion is only that it stays a JSON object).
+  Requires `mooncake` importable.
 
 ---
 
@@ -224,11 +228,13 @@ python -m sglang.launch_server \
 
 ---
 
-## Step 5 — Metadata publish  *(acceptance test — pending implementation)*
+## Step 5 — Metadata publish
 
-Status: not yet implemented. `_register_to_engine_info_bootstrap()` currently emits the
-untagged `{session_id, weights_info_dict}` payload; this step changes it to the backend-tagged
-NIXL dict with base64 `agent_metadata`.
+Implemented. `_register_to_engine_info_bootstrap()` now emits a backend-tagged dict. On the
+NIXL path (`remote_instance_nixl_agent` set) it publishes
+`{backend: "nixl", agent_name, agent_metadata (base64), weights_info_dict}`; otherwise it
+publishes the Mooncake dict `{backend: "mooncake", session_id, weights_info_dict}`. The
+`agent_metadata` bytes are base64-encoded for JSON transport.
 
 ### Test 5a — emitted payload is the tagged NIXL dict (static, no GPU)
 
@@ -313,7 +319,7 @@ reachable.
 | 6a | 6 | static | no | engine startup gates on nixl flag |
 | 6b | 6 | e2e | yes (+NIXL) | endpoint reachable (200) |
 
-No-GPU tests (1a–1c, 2a–2b, 3a, 4a) are automated by `run_tests_steps_1_4.sh`. The `<model>` e2e
-tests need the container + GPUs from `running_script.sh`; the NIXL ones additionally need NIXL +
-the UCX plugin in the image. Tests 5–6 are acceptance criteria for steps that are not yet
-implemented and will fail until those steps land.
+No-GPU tests (1a–1c, 2a–2b, 3a, 4a, 5a) are automated by `run_tests_steps_1_5.sh`. The `<model>` e2e tests need the
+container + GPUs from `running_script.sh`; the NIXL ones additionally need NIXL + the UCX plugin in
+the image. Step 5 is implemented; its e2e check (5b) shares the same NIXL launch as 3b/4b. Step 6 is
+an acceptance criterion for a step that is not yet implemented and will fail until it lands.
