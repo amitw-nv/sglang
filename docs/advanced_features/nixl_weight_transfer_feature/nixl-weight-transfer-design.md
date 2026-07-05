@@ -11,27 +11,20 @@ SGLang is the **passive target**. It does two things and nothing else:
 2. **Publish** the connection identity + per-tensor descriptors over the existing HTTP/registry so the
    external engine can connect and address the buffers.
 
-The actual data movement (descriptor build, `transfer`, completion poll) happens in **Miles/NIXL**, not in SGLang.
+The actual data movement happens in **Miles**, not in SGLang.
+
+This design **builds NIXL on top of the existing `transfer_engine` (Mooncake) infrastructure** rather than
+standing up a parallel subsystem: the Mooncake path already does buffer registration and metadata export,
+so we add a `nixl` branch inside that same machinery.
 
 ### How it is launched
 
-Miles owns the entry point. It installs SGLang in-place from the `sglang-miles` branch
-(`pip install -e "python[all]" --no-deps`) and starts the whole flow through its own launcher,
-`examples/p2p_weight_transfer/run.py`. That launcher boots the SGLang seed itself — the operator never
-calls `sglang.launch_server` directly. The NIXL path is selected with `--mode nixl`:
-
-```bash
-python examples/p2p_weight_transfer/run.py run <model> --mode nixl
-```
+Miles owns the entry point. It installs SGLang in-place and starts the whole flow through its own launcher. That launcher boots the SGLang seed itself.
 
 Under the hood `run.py` launches the SGLang seed with
 `--remote-instance-weight-loader-start-seed-via-nixl` and then runs the Miles NIXL peer that performs the
 RDMA writes. So the design below describes what SGLang must do when `run.py` starts it in `nixl` mode; the
 flag is an internal contract between Miles and SGLang, not something the user sets by hand.
-
-We are only reusing the *plumbing* that the existing
-`transfer_engine` (Mooncake) backend already established, because that plumbing already does buffer
-registration + metadata export. We add the smallest possible delta on top of it.
 
 ## 2. Assumptions
 
@@ -40,10 +33,9 @@ These are the assumptions this design is built on. If any is wrong, the correspo
 - **A1 — NIXL is the SGLang-side library; Miles is the peer/driver.** SGLang only needs a NIXL `nixl_agent`
   to (a) register memory and (b) export agent metadata. SGLang does **not** issue `transfer()` calls for
   weights; Miles does. (NIXL is already vendored for PD-disaggregation, so the import/install path exists.)
-- **A2 — We reuse the `remote_instance` / `transfer_engine` machinery as-is**, including
-  `--remote-instance-weight-loader-backend`, the `EngineInfoBootstrapServer` registry, the
-  `/remote_instance_transfer_engine_info` HTTP endpoint, and `register_memory_region`. We add a `nixl`
-  branch rather than a new parallel subsystem.
+- **A2 — We reuse the existing weight-transfer machinery as-is**, including its backend selection, the
+  registry that publishes connection info, the HTTP endpoint that serves it, and the buffer-registration
+  step. We add a `nixl` branch rather than a new parallel subsystem.
 - **A3 — SGLang never reads/pulls weights for this feature.** The R-Fork client reader path
   (`load_model_from_remote_instance_by_transfer_engine`, READ xfers) is out of scope. Miles performs WRITE.
 - **A4 — Memory is GPU (VRAM) weights.** Buffers are model parameters in CUDA memory; we register them as
@@ -81,14 +73,13 @@ We get all of this for free and reuse it:
   serves it via `/get_transfer_engine_info`, proxied to the public
   `/remote_instance_transfer_engine_info` endpoint (`entrypoints/http_server.py`).
 
-The peer (Miles, today Mooncake) reads that endpoint, learns `session_id` + buffer pointers, and writes.
+The peer (Miles) reads that endpoint, learns `session_id` + buffer pointers, and writes.
 
 ### 3.1 Block-by-block: each Mooncake API and the NIXL parallel we must provide
 
 The table below walks the weight-transfer pipeline stage by stage. The "Mooncake API" column is what the
 existing `transfer_engine` backend does today; the "NIXL parallel" column is what we have to implement to
-satisfy the same contract. The middle stages (publish + serve) are **shared SGLang plumbing** — only the
-*payload* widens; the HTTP path itself does not change.
+satisfy the same contract.
 
 | # | Pipeline block | Mooncake API (exists) | NIXL parallel (to add) | Who owns it |
 |---|---|---|---|---|
@@ -189,25 +180,3 @@ Touch points (all already exist; we widen the payload):
 Miles reads this, base64-decodes `agent_metadata`, calls `add_remote_agent(...)`, then issues NIXL WRITE
 xfers against the `(addr, size, device_id)` descriptors.
 
-## 6. Out of scope (explicitly not touched)
-
-- The broadcast / tensor update paths (`update_weights_from_distributed`, `update_weights_from_tensor`,
-  `init_weights_update_group`, `init_weights_send_group_for_remote_instance`) — NCCL/IPC, no transfer engine.
-- R-Fork SGL-to-SGL pull/reader path — no NIXL read logic is added. The reader only receives a
-  schema-compatibility tweak to consume the tagged dict (see §4.5).
-- Sharding, all-gather, dtype/`convert_to_hf`, CPU staging — all on the Miles side.
-- ModelExpress backend.
-
-## 7. Open questions / risks — resolved
-
-- **Q1 — Decommission / re-register on weight realloc.** If SGLang reallocates weight memory (e.g. quant
-  swap, CUDA-graph recapture), registered descriptors go stale and metadata must be re-published. The
-  Mooncake path has the same hazard; confirm Miles re-queries the endpoint each round.
-- **Q2 — Agent lifetime & teardown.** **Decision: keep for process lifetime.** Descriptors are pinned on the
-  agent object (`nixl_agent._weight_descs`) and released only on process exit.
-- **Q3 — Bidirectional metadata.** **Decision: SGLang is export-only.** Miles reads `agent_metadata` from
-  the HTTP endpoint, calls `add_remote_agent()` on its side, and issues WRITE transfers. SGLang does not call
-  `add_remote_agent()` back. A comment in `_remote_instance_init_nixl()` documents this assumption.
-- **Q4 — Backend transport default.** **Decision: dedicated `SGLANG_REMOTE_INSTANCE_NIXL_BACKEND` env
-  (default `UCX`).** Weight transfer and PD-disaggregation are different features, so weight transfer gets
-  its own NIXL backend env rather than overloading `SGLANG_DISAGGREGATION_NIXL_BACKEND`.

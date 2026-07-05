@@ -112,87 +112,6 @@ def get_remote_instance_transfer_engine_info_per_rank(seed_url: str, rank: int):
         return None
 
 
-def _debug_dump_weight_memory_layout(memory_snapshot, weight_addr_set, merged):
-    """Print the CUDA allocator weight-block layout; call once BEFORE and once
-    AFTER contiguous-block merging. Debug aid only (no effect on registration).
-
-    Same function, called twice on the same snapshot:
-    - ``merged=False`` -> shows every weight block exactly as the allocator laid
-      it out (the "before merge" view).
-    - ``merged=True``  -> shows the same weight blocks after physically-contiguous
-      ones within a segment are coalesced -- i.e. the regions actually registered.
-
-    For each segment it prints the segment size/type and the (raw or merged)
-    weight blocks with their sizes, plus overall counts and total memory.
-    """
-
-    def _mb(n):
-        return "n/a" if n is None or n < 0 else f"{n / (1024 * 1024):.3f} MiB"
-
-    stage = "AFTER MERGE" if merged else "BEFORE MERGE"
-    logger.info("=" * 88)
-    logger.info(f"[REG-MR DEBUG] === {stage} ===")
-
-    total_blocks = 0
-    total_size = 0
-    segments_with_weights = 0
-    for seg_idx, segment in enumerate(memory_snapshot):
-        seg_size = segment.get("total_size", segment.get("size", -1))
-        seg_type = segment.get("segment_type", "?")
-
-        # Weight blocks in this segment, in address order. When merged=True,
-        # coalesce physically-contiguous ones (same rule the real path uses).
-        seg_weight_blocks = []
-        for block in segment.get("blocks", []):
-            address = block.get("address", -1)
-            size = block.get("size", -1)
-            state = block.get("state", "")
-            if address < 0 or size < 0 or state != "active_allocated":
-                continue
-            if address not in weight_addr_set:
-                continue
-            if (
-                merged
-                and seg_weight_blocks
-                and seg_weight_blocks[-1][0] + seg_weight_blocks[-1][1] == address
-            ):
-                prev_addr, prev_size = seg_weight_blocks[-1]
-                seg_weight_blocks[-1] = (prev_addr, prev_size + size)
-            else:
-                seg_weight_blocks.append((address, size))
-
-        # Weight-focused: only print segments that actually hold weights.
-        if not seg_weight_blocks:
-            continue
-        segments_with_weights += 1
-
-        seg_weight_size = sum(size for _, size in seg_weight_blocks)
-        logger.info(
-            f"[REG-MR DEBUG] segment #{seg_idx}: seg_size={_mb(seg_size)} "
-            f"type={seg_type} weight_blocks={len(seg_weight_blocks)} "
-            f"weight_size={_mb(seg_weight_size)}"
-        )
-        for blk_idx, (address, size) in enumerate(seg_weight_blocks):
-            logger.info(
-                f"[REG-MR DEBUG]     weight block #{blk_idx}: "
-                f"addr={hex(address)} size={_mb(size)}"
-            )
-            total_blocks += 1
-            total_size += size
-
-    logger.info("-" * 88)
-    logger.info(
-        f"[REG-MR DEBUG] SUMMARY ({stage}): "
-        f"{total_blocks} weight block(s) across "
-        f"{segments_with_weights} segment(s)"
-    )
-    logger.info(
-        f"[REG-MR DEBUG] SUMMARY ({stage}): total size of all weights = "
-        f"{_mb(total_size)} ({total_size} bytes)"
-    )
-    logger.info("=" * 88)
-
-
 def register_memory_region(model, transfer_engine):
     if importlib.util.find_spec("torch") is None:
         return register_memory_region_v1(model, transfer_engine)
@@ -239,7 +158,6 @@ def register_memory_region_v2(model, transfer_engine):
     import torch
 
     memory_snapshot = torch.cuda.memory.memory_snapshot()
-    _debug_dump_weight_memory_layout(memory_snapshot, weight_addr_set, merged=False)
     weight_blocks_for_reg_mr = []
     # Blocks in each segment have continuous physical addresses,
     # so they can be merged for memory registration.
@@ -267,8 +185,6 @@ def register_memory_region_v2(model, transfer_engine):
                         current_weight_block = (address, size)
         if current_weight_block is not None:
             weight_blocks_for_reg_mr.append(current_weight_block)
-
-    _debug_dump_weight_memory_layout(memory_snapshot, weight_addr_set, merged=True)
 
     # Register merged memory blocks that hold weights.
     for weight_block in weight_blocks_for_reg_mr:
@@ -318,7 +234,6 @@ def register_memory_region_nixl(model, nixl_agent, gpu_id):
     import torch
 
     memory_snapshot = torch.cuda.memory.memory_snapshot()
-    _debug_dump_weight_memory_layout(memory_snapshot, weight_addr_set, merged=False)
     weight_blocks_for_reg_mr = []
     # Blocks in each segment have continuous physical addresses,
     # so they can be merged for memory registration.
@@ -346,8 +261,6 @@ def register_memory_region_nixl(model, nixl_agent, gpu_id):
                         current_weight_block = (address, size)
         if current_weight_block is not None:
             weight_blocks_for_reg_mr.append(current_weight_block)
-
-    _debug_dump_weight_memory_layout(memory_snapshot, weight_addr_set, merged=True)
 
     # Register merged memory blocks that hold weights. Unlike Mooncake (per-block
     # register returning an int), NIXL registers VRAM blocks in one call and returns
