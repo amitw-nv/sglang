@@ -20,7 +20,7 @@ WORKSPACE=/sgl-workspace/
 SUBPROJECT=weight_transfer
 JOB_NAME=$PORTFOLIO-$SUBPROJECT.dev
 C_NAME=$SUBPROJECT.dev_$USER
-C_IMAGE=docker://lmsysorg/sglang:nightly-dev-cu13-20260623-ba9d5aed
+C_IMAGE=docker://lmsysorg/sglang:nightly-dev-cu13-20260709-074bb928
  
 
 C_CONTAINER_SAVED_NAME=/lustre/fsw/portfolios/network/users/amitw/sglang/sglang_amit.sqsh
