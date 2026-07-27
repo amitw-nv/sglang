@@ -546,6 +546,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                         self.model, self.remote_instance_nixl_agent, self.gpu_id
                     )
                 )
+                # Capture agent metadata AFTER VRAM registration so the blob
+                # includes the rkeys for the weight buffers. Miles needs these
+                # rkeys to perform RDMA WRITEs into the registered regions.
+                self.remote_instance_transfer_engine_agent_metadata = (
+                    self.remote_instance_nixl_agent.get_agent_metadata()
+                )
             else:
                 self.remote_instance_transfer_engine_weight_info = (
                     register_memory_region(
@@ -787,9 +793,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         self.remote_instance_nixl_agent = agent
         self.remote_instance_transfer_engine_session_id = agent_name
-        self.remote_instance_transfer_engine_agent_metadata = (
-            agent.get_agent_metadata()
-        )
+        # get_agent_metadata() is NOT called here. It must be called after
+        # register_memory_region_nixl() so the blob includes the VRAM rkeys
+        # the Miles peer needs to RDMA-WRITE into the weight buffers.
+        # See initialize() where it is called post-registration.
+        self.remote_instance_transfer_engine_agent_metadata = None
         logger.info(
             f"NIXL weight-transfer agent initialized (agent_name={agent_name}, "
             f"backend={backend}) for tp_rank={self.tp_rank}"

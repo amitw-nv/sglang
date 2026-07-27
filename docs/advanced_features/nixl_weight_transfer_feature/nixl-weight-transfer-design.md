@@ -84,7 +84,7 @@ satisfy the same contract.
 | # | Pipeline block | Mooncake API (exists) | NIXL parallel (to add) | Who owns it |
 |---|---|---|---|---|
 | 1 | Engine/agent object | `TransferEngine()` | `nixl_agent(uuid, nixl_agent_config(...))` | SGLang worker |
-| 2 | Connection identity | `initialize(ip, "P2PHANDSHAKE", "rdma", dev)` → `session_id` host:port string; handshake is implicit | `agent_name` (uuid) + `agent.get_agent_metadata()` opaque blob; peer must explicitly `add_remote_agent` | SGLang worker |
+| 2 | Connection identity | `initialize(ip, "P2PHANDSHAKE", "rdma", dev)` → `session_id` host:port string; handshake is implicit | `agent_name` (uuid); `agent.get_agent_metadata()` is called **after** step 3 so rkeys are included; peer must explicitly `add_remote_agent` | SGLang worker |
 | 3 | Buffer registration | `engine.register_memory(addr, size)` per merged block | `agent.register_memory([(addr, size, gpu_id, "")], "VRAM")`, keep returned `descs` alive | SGLang worker |
 | 4 | Per-tensor descriptors | `weights_info_dict[name] = (addr, numel, element_size)` | same, plus `device_id`: `(addr, numel, element_size, device_id)` | SGLang worker |
 | 5 | Metadata publish | PUT `{session_id, weights_info_dict}` | PUT `{backend, agent_name, agent_metadata(b64), weights_info_dict}` | SGLang worker + bootstrap |
@@ -118,12 +118,15 @@ Per touch point, the smallest change that makes NIXL work. Nothing is duplicated
 ### 4.2 Agent init on the worker (branch in one method)
 - In `ModelRunner.remote_instance_init_transfer_engine()`, branch on backend:
   - `transfer_engine` → existing Mooncake `TransferEngine.initialize(..., "P2PHANDSHAKE", "rdma", ...)`.
-  - `nixl` → construct a `nixl_agent` (reuse the construction in `disaggregation/nixl/conn.py`), and store
-    `agent_name` + `agent.get_agent_metadata()` instead of `session_id`.
+  - `nixl` → construct a `nixl_agent` (reuse the construction in `disaggregation/nixl/conn.py`), store
+    `agent_name`. **Do not call `get_agent_metadata()` here** — the weight buffers are not yet
+    registered, so the blob would carry no VRAM rkeys. `get_agent_metadata()` is called in
+    `initialize()` immediately after `register_memory_region_nixl()` (§4.3), so the snapshot
+    includes the rkeys the Miles peer needs for RDMA WRITEs.
 - Store backend-neutral connection info on the runner, e.g. keep
   `remote_instance_transfer_engine_session_id` for Mooncake and add
-  `remote_instance_transfer_engine_agent_metadata` (bytes) for NIXL. (Minimal: two optional fields, not a
-  new abstraction layer.)
+  `remote_instance_transfer_engine_agent_metadata` (bytes) for NIXL — set to `None` until
+  registration completes. (Minimal: two optional fields, not a new abstraction layer.)
 
 ### 4.3 Buffer registration (branch in one helper)
 - `register_memory_region(model, engine, backend)`:
@@ -132,6 +135,12 @@ Per touch point, the smallest change that makes NIXL work. Nothing is duplicated
     `engine.register_memory(addr, size)`, and keep the returned `descs` handle alive on the agent.
   - Extend each `weights_info_dict` entry to `(data_ptr, numel, element_size, device_id)`. (Mooncake can
     ignore the 4th field; keeping a uniform tuple avoids a second code path.)
+- **Immediately after** `register_memory_region_nixl()` returns, call `agent.get_agent_metadata()` and
+  store the result in `remote_instance_transfer_engine_agent_metadata`. This ordering is critical:
+  `get_agent_metadata()` returns a snapshot of the agent's current state, which only includes rkeys for
+  already-registered regions. Calling it before registration would produce a blob with no weight rkeys,
+  causing Miles' RDMA WRITEs to land nowhere and the weight checker to see the randomized values from
+  `reset_tensors` unchanged.
 
 ### 4.4 Metadata schema (the one real change) — see §5.
 

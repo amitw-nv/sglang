@@ -60,7 +60,7 @@ This is backend-neutral — the Mooncake path still works, just with a tagged di
 
 - Add `remote_instance_nixl_agent` and `remote_instance_transfer_engine_agent_metadata` instance vars.
 - In `remote_instance_init_transfer_engine()`, branch at entry: if NIXL seed or `backend == "nixl"`, call `_remote_instance_init_nixl()` and return; otherwise run the existing Mooncake path unchanged.
-- `_remote_instance_init_nixl()`: construct `nixl_agent` (same pattern as `disaggregation/nixl/conn.py`), capture `get_agent_metadata()` bytes. SGLang is export-only — Miles handles `add_remote_agent`.
+- `_remote_instance_init_nixl()`: construct `nixl_agent` (same pattern as `disaggregation/nixl/conn.py`), store `agent_name`. Set `remote_instance_transfer_engine_agent_metadata = None` — **do not call `get_agent_metadata()` here**. The agent metadata must be captured after weight VRAM is registered (step 4) so the blob includes the RDMA rkeys for those buffers. SGLang is export-only — Miles handles `add_remote_agent`.
 
 **Tests** (details in `nixl-weight-transfer-tests.md`):
 - **3a** — `remote_instance_init_transfer_engine()` branches to `_remote_instance_init_nixl()`.
@@ -74,6 +74,7 @@ This is backend-neutral — the Mooncake path still works, just with a tagged di
 
 - Add `register_memory_region_nixl(model, nixl_agent, gpu_id)`: build `weights_info_dict[name] = (data_ptr, numel, element_size, gpu_id)` and register merged contiguous VRAM blocks with `agent.register_memory([(addr, size, gpu_id, "")], "VRAM")`.
 - In `model_runner.py` `initialize()`, branch the memory-registration block on whether `remote_instance_nixl_agent` or `remote_instance_transfer_engine` is set.
+- **After** `register_memory_region_nixl()` returns, call `agent.get_agent_metadata()` and store the result in `remote_instance_transfer_engine_agent_metadata`. This must happen here — not in step 3 — because `get_agent_metadata()` is a snapshot: it only includes rkeys for regions registered at call time. Calling it before registration produces a blob with no weight rkeys, so Miles' RDMA WRITEs silently write nowhere and the weight checker sees the random values from `reset_tensors` unchanged.
 
 **Tests** (details in `nixl-weight-transfer-tests.md`):
 - **4a** — `register_memory_region_nixl` exists and builds 4-field (`+gpu_id`) entries.
