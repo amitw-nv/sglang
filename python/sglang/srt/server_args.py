@@ -7390,16 +7390,6 @@ class ServerArgs:
             "Enable FlashInfer allreduce fusion with Residual RMSNorm.",
         )
         parser.add_argument(
-            "--enable-precise-embedding-interpolation",
-            action="store_true",
-            help="Enable corner alignment for resize of embeddings grid to ensure more accurate(but slower) evaluation of interpolated embedding values.",
-        )
-        parser.add_argument(
-            "--enable-fused-moe-sum-all-reduce",
-            action="store_true",
-            help="Enable fused moe triton and sum all reduce.",
-        )
-        parser.add_argument(
             "--gc-threshold",
             type=int,
             nargs="+",
