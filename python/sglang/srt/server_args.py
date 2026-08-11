@@ -2662,12 +2662,16 @@ class ServerArgs:
         ),
     ] = None
     remote_instance_weight_loader_backend: A[
-        Literal["transfer_engine", "nccl", "modelexpress"],
-        "The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', or 'modelexpress'. Default is 'nccl'.",
+        Literal["transfer_engine", "nccl", "modelexpress", "nixl"],
+        "The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', 'modelexpress', or 'nixl'. Default is 'nccl'.",
     ] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: A[
         bool,
         "Start seed server via transfer engine backend for remote instance weight loader.",
+    ] = False
+    remote_instance_weight_loader_start_seed_via_nixl: A[
+        bool,
+        "Start seed server via NIXL backend for remote instance weight loader.",
     ] = False
     engine_info_bootstrap_port: A[
         int,
@@ -6369,6 +6373,10 @@ class ServerArgs:
                 self.validate_transfer_engine()
             )
 
+        # Check whether NIXL can be used when users want to start seed service that supports NIXL backend.
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
+            self.remote_instance_weight_loader_start_seed_via_nixl = self.validate_nixl()
+
     def _is_mistral_native_format(self) -> bool:
         """True iff the checkpoint requires load_format=mistral.
 
@@ -7381,6 +7389,296 @@ class ServerArgs:
             help="(Deprecated: use --flashinfer-allreduce-fusion-backend=auto) "
             "Enable FlashInfer allreduce fusion with Residual RMSNorm.",
         )
+        parser.add_argument(
+            "--enable-precise-embedding-interpolation",
+            action="store_true",
+            help="Enable corner alignment for resize of embeddings grid to ensure more accurate(but slower) evaluation of interpolated embedding values.",
+        )
+        parser.add_argument(
+            "--enable-fused-moe-sum-all-reduce",
+            action="store_true",
+            help="Enable fused moe triton and sum all reduce.",
+        )
+        parser.add_argument(
+            "--gc-threshold",
+            type=int,
+            nargs="+",
+            help="Set the garbage collection thresholds (the collection frequency). Accepts 1 to 3 integers.",
+        )
+
+        # Dynamic batch tokenizer
+        parser.add_argument(
+            "--enable-dynamic-batch-tokenizer",
+            action="store_true",
+            help="Enable async dynamic batch tokenizer for improved performance when multiple requests arrive concurrently.",
+        )
+        parser.add_argument(
+            "--dynamic-batch-tokenizer-batch-size",
+            type=int,
+            default=ServerArgs.dynamic_batch_tokenizer_batch_size,
+            help="[Only used if --enable-dynamic-batch-tokenizer is set] Maximum batch size for dynamic batch tokenizer.",
+        )
+        parser.add_argument(
+            "--dynamic-batch-tokenizer-batch-timeout",
+            type=float,
+            default=ServerArgs.dynamic_batch_tokenizer_batch_timeout,
+            help="[Only used if --enable-dynamic-batch-tokenizer is set] Timeout in seconds for batching tokenization requests.",
+        )
+
+        # Debug tensor dumps
+        parser.add_argument(
+            "--debug-tensor-dump-output-folder",
+            type=str,
+            default=ServerArgs.debug_tensor_dump_output_folder,
+            help="The output folder for dumping tensors.",
+        )
+        parser.add_argument(
+            "--debug-tensor-dump-layers",
+            type=int,
+            nargs="+",
+            help="The layer ids to dump. Dump all layers if not specified.",
+        )
+        parser.add_argument(
+            "--debug-tensor-dump-input-file",
+            type=str,
+            default=ServerArgs.debug_tensor_dump_input_file,
+            help="The input filename for dumping tensors",
+        )
+        parser.add_argument(
+            "--debug-tensor-dump-inject",
+            type=str,
+            default=ServerArgs.debug_tensor_dump_inject,
+            help="Inject the outputs from jax as the input of every layer.",
+        )
+
+        # PD disaggregation
+        parser.add_argument(
+            "--disaggregation-mode",
+            type=str,
+            default=ServerArgs.disaggregation_mode,
+            choices=["null", "prefill", "decode"],
+            help='Only used for PD disaggregation. "prefill" for prefill-only server, and "decode" for decode-only server. If not specified, it is not PD disaggregated',
+        )
+        parser.add_argument(
+            "--disaggregation-transfer-backend",
+            type=str,
+            default=ServerArgs.disaggregation_transfer_backend,
+            choices=DISAGG_TRANSFER_BACKEND_CHOICES,
+            help="The backend for disaggregation transfer. Default is mooncake.",
+        )
+        parser.add_argument(
+            "--disaggregation-bootstrap-port",
+            type=int,
+            default=ServerArgs.disaggregation_bootstrap_port,
+            help="Bootstrap server port on the prefill server. Default is 8998.",
+        )
+        parser.add_argument(
+            "--disaggregation-ib-device",
+            type=str,
+            default=ServerArgs.disaggregation_ib_device,
+            help="The InfiniBand devices for disaggregation transfer, accepts single device (e.g., --disaggregation-ib-device mlx5_0) "
+            "or multiple comma-separated devices (e.g., --disaggregation-ib-device mlx5_0,mlx5_1). "
+            "Default is None, which triggers automatic device detection when mooncake backend is enabled.",
+        )
+        parser.add_argument(
+            "--disaggregation-decode-enable-offload-kvcache",
+            action="store_true",
+            help="Enable async KV cache offloading on decode server (PD mode).",
+        )
+        parser.add_argument(
+            "--num-reserved-decode-tokens",
+            type=int,
+            default=ServerArgs.num_reserved_decode_tokens,
+            help="Number of decode tokens that will have memory reserved when adding new request to the running batch.",
+        )
+        parser.add_argument(
+            "--disaggregation-decode-polling-interval",
+            type=int,
+            default=ServerArgs.disaggregation_decode_polling_interval,
+            help="The interval to poll requests in decode server. Can be set to >1 to reduce the overhead of this.",
+        )
+
+        # Encode prefill disaggregation
+        parser.add_argument(
+            "--encoder-only",
+            action="store_true",
+            help="For MLLM with an encoder, launch an encoder-only server",
+        )
+        parser.add_argument(
+            "--language-only",
+            action="store_true",
+            help="For VLM, load weights for the language model only.",
+        )
+        parser.add_argument(
+            "--encoder-transfer-backend",
+            type=str,
+            default=ServerArgs.encoder_transfer_backend,
+            choices=ENCODER_TRANSFER_BACKEND_CHOICES,
+            help="The backend for encoder disaggregation transfer. Default is zmq_to_scheduler.",
+        )
+        parser.add_argument(
+            "--encoder-urls",
+            nargs="+",
+            type=str,
+            default=[],
+            help="List of encoder server urls.",
+        )
+        parser.add_argument(
+            "--enable-adaptive-dispatch-to-encoder",
+            default=ServerArgs.enable_adaptive_dispatch_to_encoder,
+            action="store_true",
+            help="When enabled, adaptively dispatch: multi-image requests go to encoder in language_only epd mode, single-image requests are processed locally.",
+        )
+
+        # Custom weight loader
+        parser.add_argument(
+            "--custom-weight-loader",
+            type=str,
+            nargs="*",
+            default=None,
+            help="The custom dataloader which used to update the model. Should be set with a valid import path, such as my_package.weight_load_func",
+        )
+        parser.add_argument(
+            "--weight-loader-disable-mmap",
+            action="store_true",
+            help="Disable mmap while loading weight using safetensors.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-seed-instance-ip",
+            type=str,
+            default=ServerArgs.remote_instance_weight_loader_seed_instance_ip,
+            help="The ip of the seed instance for loading weights from remote instance.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-seed-instance-service-port",
+            type=int,
+            default=ServerArgs.remote_instance_weight_loader_seed_instance_service_port,
+            help="The service port of the seed instance for loading weights from remote instance.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-send-weights-group-ports",
+            type=json_list_type,
+            default=ServerArgs.remote_instance_weight_loader_send_weights_group_ports,
+            help="The communication group ports for loading weights from remote instance.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-backend",
+            type=str,
+            choices=["transfer_engine", "nccl", "modelexpress", "nixl"],
+            default=ServerArgs.remote_instance_weight_loader_backend,
+            help="The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', 'modelexpress', or 'nixl'. Default is 'nccl'.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-start-seed-via-transfer-engine",
+            action="store_true",
+            help="Start seed server via transfer engine backend for remote instance weight loader.",
+        )
+        parser.add_argument(
+            "--remote-instance-weight-loader-start-seed-via-nixl",
+            action="store_true",
+            help="Start seed server via NIXL backend for remote instance weight loader.",
+        )
+        parser.add_argument(
+            "--engine-info-bootstrap-port",
+            type=int,
+            default=ServerArgs.engine_info_bootstrap_port,
+            help="Port for the engine info bootstrap server. Default is 6789. "
+            "Must be set explicitly when running multiple instances on the same node.",
+        )
+        parser.add_argument(
+            "--modelexpress-config",
+            type=str,
+            default=ServerArgs.modelexpress_config,
+            help='JSON config for ModelExpress P2P weight loading. Keys: "url" (required, gRPC host:port), "model_name" (optional, defaults to --model-path), "source" (optional bool, true for seed mode). Example: \'{"url": "localhost:8001", "model_name": "my-model", "source": true}\'',
+        )
+
+        # For PD-Multiplexing
+        parser.add_argument(
+            "--enable-pdmux",
+            action="store_true",
+            help="Enable PD-Multiplexing, PD running on greenctx stream.",
+        )
+        parser.add_argument(
+            "--pdmux-config-path",
+            type=str,
+            default=None,
+            help="The path of the PD-Multiplexing config file.",
+        )
+        parser.add_argument(
+            "--sm-group-num",
+            type=int,
+            default=ServerArgs.sm_group_num,
+            help="Number of sm partition groups.",
+        )
+
+        # Configuration file support
+        parser.add_argument(
+            "--config",
+            type=str,
+            help="Read CLI options from a config file. Must be a YAML file with configuration options.",
+        )
+
+        # For Multi-Modal
+        parser.add_argument(
+            "--enable-broadcast-mm-inputs-process",
+            action="store_true",
+            default=ServerArgs.enable_broadcast_mm_inputs_process,
+            help="Enable broadcast mm-inputs process in scheduler.",
+        )
+        parser.add_argument(
+            "--mm-process-config",
+            type=json.loads,
+            default=ServerArgs.mm_process_config,
+            help="Multimodal preprocessing config, a json config contains keys: `image`, `video`, `audio`",
+        )
+        parser.add_argument(
+            "--mm-enable-dp-encoder",
+            action="store_true",
+            default=ServerArgs.mm_enable_dp_encoder,
+            help="Enabling data parallelism for mm encoder. The dp size will be set to the tp size automatically.",
+        )
+        parser.add_argument(
+            "--limit-mm-data-per-request",
+            type=json.loads,
+            default=ServerArgs.limit_mm_data_per_request,
+            help="Limit the number of multimodal inputs per request. "
+            'e.g. \'{"image": 1, "video": 1, "audio": 1}\'',
+        )
+
+        # For checkpoint decryption
+        parser.add_argument(
+            "--decrypted-config-file",
+            type=str,
+            default=ServerArgs.decrypted_config_file,
+            help="The path of the decrypted config file.",
+        )
+        parser.add_argument(
+            "--decrypted-draft-config-file",
+            type=str,
+            default=ServerArgs.decrypted_draft_config_file,
+            help="The path of the decrypted draft config file.",
+        )
+        parser.add_argument(
+            "--enable-prefix-mm-cache",
+            action="store_true",
+            default=ServerArgs.enable_prefix_mm_cache,
+            help="Enable prefix multimodal cache. Currently only supports mm-only.",
+        )
+
+        parser.add_argument(
+            "--enable-mm-global-cache",
+            action="store_true",
+            default=ServerArgs.enable_mm_global_cache,
+            help="Enable global multimodal embedding cache to skip redundant ViT inference.",
+        )
+
+        # For registering hooks
+        parser.add_argument(
+            "--forward-hooks",
+            type=json_list_type,
+            default=ServerArgs.forward_hooks,
+            help="JSON-formatted forward hook specifications to attach to the model.",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -8052,6 +8350,18 @@ class ServerArgs:
         else:
             return True
 
+    def validate_nixl(self):
+        try:
+            nixl_available = importlib.util.find_spec("nixl._api") is not None
+        except (ModuleNotFoundError, ValueError):
+            nixl_available = False
+        if not nixl_available:
+            logger.warning(
+                "Failed to import nixl._api. Does not support using NIXL as remote instance weight loader backend."
+            )
+            return False
+        return True
+
     @property
     def _parsed_modelexpress_config(self) -> dict:
         cache = getattr(self, "_mx_config_cache", None)
@@ -8079,9 +8389,13 @@ class ServerArgs:
         # Use TransferEngine as seed backend.
         if self.remote_instance_weight_loader_start_seed_via_transfer_engine:
             return True
+        # Use NIXL as seed backend (shares the transfer-engine init/registration plumbing).
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
+            return True
         # Use TransferEngine as client backend.
         if self.load_format == "remote_instance" and (
             self.remote_instance_weight_loader_backend == "transfer_engine"
+            or self.remote_instance_weight_loader_backend == "nixl"
             or (
                 self.remote_instance_weight_loader_backend == "modelexpress"
                 and self.modelexpress_transport == "transfer_engine"
