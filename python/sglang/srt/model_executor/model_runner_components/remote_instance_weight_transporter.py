@@ -43,26 +43,25 @@ class RemoteInstanceWeightTransporter:
         )
         if use_nixl:
             self._init_nixl()
-            return
-
-        try:
-            from mooncake.engine import TransferEngine
-        except ImportError:
-            logger.warning(
-                "Please install mooncake for using remote instance transfer engine: pip install mooncake-transfer-engine"
+        else:
+            try:
+                from mooncake.engine import TransferEngine
+            except ImportError:
+                logger.warning(
+                    "Please install mooncake for using remote instance transfer engine: pip install mooncake-transfer-engine"
+                )
+                return
+            self.engine = TransferEngine()
+            local_ip = get_local_ip_auto()
+            self.engine.initialize(
+                local_ip,
+                "P2PHANDSHAKE",
+                envs.MOONCAKE_PROTOCOL.get(),
+                envs.MOONCAKE_DEVICE.get(),
             )
-            return
-        self.engine = TransferEngine()
-        local_ip = get_local_ip_auto()
-        self.engine.initialize(
-            local_ip,
-            "P2PHANDSHAKE",
-            envs.MOONCAKE_PROTOCOL.get(),
-            envs.MOONCAKE_DEVICE.get(),
-        )
-        self.session_id = NetworkAddress(
-            local_ip, self.engine.get_rpc_port()
-        ).to_host_port_str()
+            self.session_id = NetworkAddress(
+                local_ip, self.engine.get_rpc_port()
+            ).to_host_port_str()
         self.parallelism_config = RankParallelismConfig.from_parallel_state(
             self.tp_rank
         )
