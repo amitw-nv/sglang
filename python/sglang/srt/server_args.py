@@ -720,7 +720,7 @@ class ServerArgs:
     remote_instance_weight_loader_seed_instance_service_port: Optional[int] = None
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
     remote_instance_weight_loader_backend: Literal[
-        "transfer_engine", "nccl", "modelexpress", "nixl"
+        "transfer_engine", "nccl", "modelexpress"
     ] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: bool = False
     remote_instance_weight_loader_start_seed_via_nixl: bool = False
@@ -5909,9 +5909,9 @@ class ServerArgs:
         parser.add_argument(
             "--remote-instance-weight-loader-backend",
             type=str,
-            choices=["transfer_engine", "nccl", "modelexpress", "nixl"],
+            choices=["transfer_engine", "nccl", "modelexpress"],
             default=ServerArgs.remote_instance_weight_loader_backend,
-            help="The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', 'modelexpress', or 'nixl'. Default is 'nccl'.",
+            help="The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', or 'modelexpress'. Default is 'nccl'.",
         )
         parser.add_argument(
             "--remote-instance-weight-loader-start-seed-via-transfer-engine",
@@ -6571,7 +6571,7 @@ class ServerArgs:
         elif (
             self.load_format == "remote_instance"
             and self.remote_instance_weight_loader_backend
-            in ("transfer_engine", "modelexpress", "nixl")
+            in ("transfer_engine", "modelexpress")
         ):
             return True
         else:

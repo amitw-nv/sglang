@@ -735,10 +735,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
     def remote_instance_init_transfer_engine(self):
-        use_nixl = (
-            self.server_args.remote_instance_weight_loader_start_seed_via_nixl
-            or self.server_args.remote_instance_weight_loader_backend == "nixl"
-        )
+        use_nixl = self.server_args.remote_instance_weight_loader_start_seed_via_nixl
         if use_nixl:
             self._remote_instance_init_nixl()
             return
