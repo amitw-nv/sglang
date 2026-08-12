@@ -111,16 +111,16 @@ inside an already-existing block.
 
 Per touch point, the smallest change that makes NIXL work. Nothing is duplicated that can be branched.
 
-### 4.1 Backend enum + arg (tiny)
-- Add `NIXL = "nixl"` to `RemoteInstanceWeightLoaderBackend`.
-- Add `"nixl"` to the `remote_instance_weight_loader_backend` `Literal` in `server_args.py`.
+### 4.1 Seed-mode argument (tiny)
 - Add `--remote-instance-weight-loader-start-seed-via-nixl` bool flag (analogous to the existing
   `--remote-instance-weight-loader-start-seed-via-transfer-engine`). This is the trigger for NIXL seed mode.
-- Extend `remote_instance_weight_loader_use_transfer_engine()` to return `True` when either
-  `remote_instance_weight_loader_start_seed_via_nixl` is set or `backend == "nixl"`.
+- Extend `remote_instance_weight_loader_use_transfer_engine()` to return `True` when
+  `remote_instance_weight_loader_start_seed_via_nixl` is set.
+- Do not add NIXL to `RemoteInstanceWeightLoaderBackend`: that enum selects the R-Fork receiver,
+  while this feature only implements the passive seed/write-target path.
 
 ### 4.2 Agent init on the worker (branch in `RemoteInstanceWeightTransporter.init_engine()`)
-- `RemoteInstanceWeightTransporter.init_engine()` branches on backend:
+- `RemoteInstanceWeightTransporter.init_engine()` branches on the seed-mode flag:
   - `transfer_engine` / `mooncake` → existing path: create `TransferEngine`, call
     `initialize(..., "P2PHANDSHAKE", ...)`, store `session_id` as host:port string.
   - `nixl` → calls `_init_nixl()`: construct a `nixl_agent`, store `agent_name` as `session_id`.

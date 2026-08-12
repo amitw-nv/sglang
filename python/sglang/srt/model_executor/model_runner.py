@@ -19,7 +19,6 @@ import contextlib
 import inspect
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -114,13 +113,6 @@ from sglang.srt.model_executor.model_runner_components.cuda_graph_setup import (
     capture_cuda_graphs,
     capture_decode_graph,
     capture_prefill_graph,
-)
-from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
-from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
-    RemoteInstanceWeightLoaderBackend,
-    register_memory_region,
-    register_memory_region_nixl,
-    trigger_init_weights_send_group_for_remote_instance_request,
 )
 from sglang.srt.model_executor.model_runner_components.kv_pool_runtime import (
     compute_post_capture_kv_resize,

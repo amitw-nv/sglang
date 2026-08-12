@@ -2662,8 +2662,8 @@ class ServerArgs:
         ),
     ] = None
     remote_instance_weight_loader_backend: A[
-        Literal["transfer_engine", "nccl", "modelexpress", "nixl"],
-        "The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', 'modelexpress', or 'nixl'. Default is 'nccl'.",
+        Literal["transfer_engine", "nccl", "modelexpress"],
+        "The backend for loading weights from remote instance. Can be 'transfer_engine', 'nccl', or 'modelexpress'. Default is 'nccl'.",
     ] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: A[
         bool,
@@ -8104,7 +8104,6 @@ class ServerArgs:
         # Use TransferEngine as client backend.
         if self.load_format == "remote_instance" and (
             self.remote_instance_weight_loader_backend == "transfer_engine"
-            or self.remote_instance_weight_loader_backend == "nixl"
             or (
                 self.remote_instance_weight_loader_backend == "modelexpress"
                 and self.modelexpress_transport == "transfer_engine"

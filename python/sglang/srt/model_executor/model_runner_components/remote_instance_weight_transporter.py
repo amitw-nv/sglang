@@ -37,10 +37,7 @@ class RemoteInstanceWeightTransporter:
         return self.get_model()
 
     def init_engine(self):
-        use_nixl = (
-            self.server_args.remote_instance_weight_loader_start_seed_via_nixl
-            or self.server_args.remote_instance_weight_loader_backend == "nixl"
-        )
+        use_nixl = self.server_args.remote_instance_weight_loader_start_seed_via_nixl
         if use_nixl:
             self._init_nixl()
         else:
