@@ -2950,11 +2950,75 @@ class RankParallelismConfig:
 
 
 # Globals on parallel_state module to save/restore
-_PS_GLOBALS = ("_TP", "_PP", "_MOE_EP", "_MOE_TP", "_ATTN_TP", "_ATTN_CP", "_MOE_DP")
+_PS_GLOBALS = (
+    "_WORLD",
+    "_TP",
+    "_PP",
+    "_MOE_EP",
+    "_MOE_TP",
+    "_ATTN_TP",
+    "_ATTN_CP",
+    "_MOE_DP",
+)
 # Globals on dp_attention module to save/restore. v0.5.16 moved the dp-attention
 # enable flag out of this module onto the runtime flags (get_flags().dp.enabled),
 # so it is saved/restored separately below rather than as a module attribute.
 _DA_GLOBALS = ("_ATTN_DP_RANK", "_ATTN_DP_SIZE")
+
+# 1-rank gloo group reused by ParallelismContext so torch.distributed accepts
+# cpu_group / device_group on a CPU replica that has no live TP/EP group.
+_REPLICA_LOCAL_GROUP: Optional[ProcessGroup] = None
+_REPLICA_LOCAL_STORE_DIR: Optional[str] = None
+
+
+def _get_replica_local_process_group() -> ProcessGroup:
+    """Return a 1-rank gloo ProcessGroup for CPU-replica ParallelismContext.
+
+    v0.5.16 treats GroupCoordinator.cpu_group as a real ProcessGroup. A
+    MagicMock is rejected with "not initialized in the world group map".
+    Collectives on a 1-rank group are no-ops.
+
+    Miles builds the replica inside MegatronTrainRayActor, which already has
+    a multi-rank training WORLD (e.g. 64). new_group() is a WORLD collective,
+    so every rank must call it with the same ranks= for each singleton. Do
+    not reuse WORLD: get_model paths diverge by PP/CP rank and would hang.
+    """
+    global _REPLICA_LOCAL_GROUP, _REPLICA_LOCAL_STORE_DIR
+    if _REPLICA_LOCAL_GROUP is not None:
+        return _REPLICA_LOCAL_GROUP
+
+    if not torch.distributed.is_initialized():
+        import tempfile
+
+        _REPLICA_LOCAL_STORE_DIR = tempfile.mkdtemp(prefix="sglang_parallelism_context_")
+        store = torch.distributed.FileStore(
+            os.path.join(_REPLICA_LOCAL_STORE_DIR, "store"), 1
+        )
+        torch.distributed.init_process_group(
+            backend="gloo", store=store, rank=0, world_size=1
+        )
+        _REPLICA_LOCAL_GROUP = torch.distributed.group.WORLD
+        return _REPLICA_LOCAL_GROUP
+
+    world_size = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
+    if world_size == 1:
+        backend = torch.distributed.get_backend()
+        if backend != "nccl":
+            _REPLICA_LOCAL_GROUP = torch.distributed.group.WORLD
+            return _REPLICA_LOCAL_GROUP
+        _REPLICA_LOCAL_GROUP = torch.distributed.new_group(
+            ranks=[rank], backend="gloo"
+        )
+        return _REPLICA_LOCAL_GROUP
+
+    local_group = None
+    for peer in range(world_size):
+        group = torch.distributed.new_group(ranks=[peer], backend="gloo")
+        if peer == rank:
+            local_group = group
+    _REPLICA_LOCAL_GROUP = local_group
+    return _REPLICA_LOCAL_GROUP
 
 
 class ParallelismContext:
@@ -2973,7 +3037,12 @@ class ParallelismContext:
         self._original_globals: Dict[str, Any] = {}
 
     def _create_mock_group(self, world_size: int, rank_in_group: int):
-        """Create a mock group coordinator with all necessary properties."""
+        """Create a mock group coordinator with all necessary properties.
+
+        Rank/size fields stay mocked (the replica is not in a real 32-way
+        group). cpu_group / device_group must be a real ProcessGroup: v0.5.16
+        passes them to torch.distributed, which rejects MagicMock.
+        """
         mock_group = MagicMock()
         mock_group.world_size = world_size
         mock_group.rank_in_group = rank_in_group
@@ -2986,6 +3055,16 @@ class ParallelismContext:
         mock_group.is_last_rank = rank_in_group == world_size - 1
         mock_group.next_rank = mock_group.ranks[(rank_in_group + 1) % world_size]
         mock_group.prev_rank = mock_group.ranks[(rank_in_group - 1) % world_size]
+        local_pg = _get_replica_local_process_group()
+        mock_group.cpu_group = local_pg
+        mock_group.device_group = local_pg
+        mock_group.ca_comm = None
+        mock_group.pynccl_comm = None
+        mock_group.pymscclpp_comm = None
+        mock_group.mq_broadcaster = None
+        mock_group.use_pynccl = False
+        mock_group.use_custom_allreduce = False
+        mock_group.use_message_queue_broadcaster = False
         return mock_group
 
     def __enter__(self):
@@ -3003,6 +3082,7 @@ class ParallelismContext:
 
         # Build and set mock group objects on parallel_state
         _ps_new_values = {
+            "_WORLD": self._create_mock_group(conf.world_size, conf.global_rank),
             "_TP": self._create_mock_group(conf.tp_size, conf.tp_rank),
             "_PP": self._create_mock_group(conf.pp_size, conf.pp_rank),
             "_MOE_EP": self._create_mock_group(conf.ep_size, conf.ep_rank),
