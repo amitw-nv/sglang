@@ -2669,6 +2669,10 @@ class ServerArgs:
         bool,
         "Start seed server via transfer engine backend for remote instance weight loader.",
     ] = False
+    remote_instance_weight_loader_start_seed_via_nixl: A[
+        bool,
+        "Start seed server via NIXL backend for remote instance weight loader.",
+    ] = False
     engine_info_bootstrap_port: A[
         int,
         "Port for the engine info bootstrap server. Default is 6789. Must be set explicitly when running multiple instances on the same node.",
@@ -6369,6 +6373,10 @@ class ServerArgs:
                 self.validate_transfer_engine()
             )
 
+        # Check whether NIXL can be used when users want to start seed service that supports NIXL backend.
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
+            self.remote_instance_weight_loader_start_seed_via_nixl = self.validate_nixl()
+
     def _is_mistral_native_format(self) -> bool:
         """True iff the checkpoint requires load_format=mistral.
 
@@ -7381,7 +7389,6 @@ class ServerArgs:
             help="(Deprecated: use --flashinfer-allreduce-fusion-backend=auto) "
             "Enable FlashInfer allreduce fusion with Residual RMSNorm.",
         )
-
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # Some dataclass fields (e.g. stat_loggers) intentionally have no CLI
@@ -8052,6 +8059,18 @@ class ServerArgs:
         else:
             return True
 
+    def validate_nixl(self):
+        try:
+            nixl_available = importlib.util.find_spec("nixl._api") is not None
+        except (ModuleNotFoundError, ValueError):
+            nixl_available = False
+        if not nixl_available:
+            logger.warning(
+                "Failed to import nixl._api. Does not support using NIXL as remote instance weight loader backend."
+            )
+            return False
+        return True
+
     @property
     def _parsed_modelexpress_config(self) -> dict:
         cache = getattr(self, "_mx_config_cache", None)
@@ -8078,6 +8097,9 @@ class ServerArgs:
     def remote_instance_weight_loader_use_transfer_engine(self):
         # Use TransferEngine as seed backend.
         if self.remote_instance_weight_loader_start_seed_via_transfer_engine:
+            return True
+        # Use NIXL as seed backend (shares the transfer-engine init/registration plumbing).
+        if self.remote_instance_weight_loader_start_seed_via_nixl:
             return True
         # Use TransferEngine as client backend.
         if self.load_format == "remote_instance" and (

@@ -499,6 +499,9 @@ class Envs:
     MOONCAKE_GLOBAL_SEGMENT_SIZE = EnvStr("4gb")
     MOONCAKE_PROTOCOL = EnvStr("rdma")
     MOONCAKE_DEVICE = EnvStr("")
+    # NIXL transport backend used by the remote-instance weight-transfer agent.
+    # Scoped to weight transfer (distinct from PD-disaggregation's NIXL backend).
+    SGLANG_REMOTE_INSTANCE_NIXL_BACKEND = EnvStr("UCX")
     MOONCAKE_MASTER_METRICS_PORT = EnvInt(9003)
     MOONCAKE_CHECK_SERVER = EnvBool(False)
     MOONCAKE_STANDALONE_STORAGE = EnvBool(False)
