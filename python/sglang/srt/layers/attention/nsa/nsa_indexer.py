@@ -29,6 +29,15 @@ if _is_cuda:
     except ImportError as e:
         deep_gemm = e
 
+def _to_2d_context_lens(seqlens_32: torch.Tensor) -> torch.Tensor:
+    """DeepGEMM's get_paged_mqa_logits_metadata requires context_lens shaped
+    [batch_size, next_n]; here each entry already corresponds 1:1 to a query
+    (next_n=1), so a flat 1D seqlens tensor just needs a trailing dim."""
+    if seqlens_32.dim() == 2:
+        return seqlens_32
+    return seqlens_32.unsqueeze(-1)
+
+
 if is_npu():
     import torch_npu
     from sglang.srt.hardware_backend.npu.utils import get_indexer_weight_stream
@@ -418,10 +427,15 @@ class Indexer(MultiPlatformOp):
         # Reuse pre-computed schedule metadata if available (from init_forward_metadata),
         # otherwise fall back to computing it here.
         schedule_metadata = getattr(metadata, "paged_mqa_schedule_metadata", None)
+        # DeepGEMM release-0426 requires context_lens of shape [batch_size, next_n]
+        # to match q.shape = [batch_size, next_n, heads, head_dim]. The indexer uses
+        # next_n=1 with batch_size=N_total via q_fp8.unsqueeze(1) below, so mirror
+        # that layout here.
+        seqlens_32_2d = _to_2d_context_lens(seqlens_32)
         if _is_cuda:
             if schedule_metadata is None:
                 schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                    seqlens_32, blocksize, self.sm_count
+                    seqlens_32_2d, blocksize, self.sm_count
                 )
 
         assert len(q_fp8.shape) == 3
@@ -473,7 +487,7 @@ class Indexer(MultiPlatformOp):
                 q_fp8[:q_offset],
                 kv_cache_fp8,
                 weights[:q_offset],
-                seqlens_32,
+                seqlens_32_2d,
                 block_tables,
                 schedule_metadata,
                 max_seq_len,
