@@ -24,6 +24,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
@@ -149,6 +150,7 @@ from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
 from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
     RemoteInstanceWeightLoaderBackend,
     register_memory_region,
+    register_memory_region_nixl,
     trigger_init_weights_send_group_for_remote_instance_request,
 )
 from sglang.srt.model_loader.utils import set_default_torch_dtype
@@ -356,6 +358,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
         self.remote_instance_transfer_engine_weight_info = None
+        self.remote_instance_nixl_agent = None
+        self.remote_instance_transfer_engine_agent_metadata = None
         self.parallelism_config = None
         # auxiliary hidden capture mode. TODO: expose this to server args?
         self.eagle_use_aux_hidden_state = False
@@ -527,13 +531,33 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if (
             self.server_args.remote_instance_weight_loader_use_transfer_engine()
-            and self.remote_instance_transfer_engine is not None
             and self.remote_instance_transfer_engine_weight_info is None
-        ):
-            # Register memory and upstream the transfer engine info to the bootstrap server
-            self.remote_instance_transfer_engine_weight_info = register_memory_region(
-                self.model, self.remote_instance_transfer_engine
+            and (
+                self.remote_instance_nixl_agent is not None
+                or self.remote_instance_transfer_engine is not None
             )
+        ):
+            # Register memory and upstream the transfer engine info to the bootstrap server.
+            # Branch on which backend's engine/agent was initialized in
+            # remote_instance_init_transfer_engine().
+            if self.remote_instance_nixl_agent is not None:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region_nixl(
+                        self.model, self.remote_instance_nixl_agent, self.gpu_id
+                    )
+                )
+                # Capture agent metadata AFTER VRAM registration so the blob
+                # includes the rkeys for the weight buffers. Miles needs these
+                # rkeys to perform RDMA WRITEs into the registered regions.
+                self.remote_instance_transfer_engine_agent_metadata = (
+                    self.remote_instance_nixl_agent.get_agent_metadata()
+                )
+            else:
+                self.remote_instance_transfer_engine_weight_info = (
+                    register_memory_region(
+                        self.model, self.remote_instance_transfer_engine
+                    )
+                )
             self._register_to_engine_info_bootstrap()
 
         # Register parallelism config with the bootstrap server
@@ -711,6 +735,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
     def remote_instance_init_transfer_engine(self):
+        use_nixl = self.server_args.remote_instance_weight_loader_start_seed_via_nixl
+        if use_nixl:
+            self._remote_instance_init_nixl()
+            return
+
         try:
             from mooncake.engine import TransferEngine
         except ImportError as e:
@@ -728,51 +757,48 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             local_ip, self.remote_instance_transfer_engine.get_rpc_port()
         ).to_host_port_str()
 
-    def _register_to_engine_info_bootstrap(self):
-        """Register transfer engine info with the EngineInfoBootstrapServer via HTTP PUT.
+    def _remote_instance_init_nixl(self):
+        """Initialize a NIXL agent on the worker (NIXL weight-transfer backend).
 
-        The bootstrap server runs on node_rank==0. For multi-node setups, the
-        host is derived from dist_init_addr. For single-node, use 127.0.0.1.
+        SGLang is the passive, export-only target: it creates a ``nixl_agent`` and
+        captures its opaque ``agent_metadata`` blob so the metadata can be published
+        for the external peer (Miles). SGLang does NOT call ``add_remote_agent`` and
+        does NOT issue ``transfer()`` calls itself -- the peer registers SGLang's
+        agent metadata on its side and performs the RDMA WRITEs.
         """
-        import requests as http_requests
-
-        if self.server_args.dist_init_addr:
-            # Multi-node: bootstrap server is on the head node (node_rank==0).
-            # Derive host from dist_init_addr (shared across all nodes).
-            bootstrap_host = (
-                NetworkAddress.parse(self.server_args.dist_init_addr).resolved().host
-            )
-        else:
-            bootstrap_host = "127.0.0.1"
-
-        bootstrap_port = self.server_args.engine_info_bootstrap_port
-        bootstrap_na = NetworkAddress(bootstrap_host, bootstrap_port)
-        url = f"{bootstrap_na.to_url()}/register_transfer_engine_info"
-
-        payload = {
-            "tp_rank": self.tp_rank,
-            "transfer_engine_info": {
-                "session_id": self.remote_instance_transfer_engine_session_id,
-                "weights_info_dict": self.remote_instance_transfer_engine_weight_info,
-            },
-        }
-
         try:
-            resp = http_requests.put(url, json=payload, timeout=5)
-            if resp.status_code == 200:
-                logger.info(
-                    f"Registered transfer engine info for tp_rank={self.tp_rank} "
-                    f"with bootstrap server at {bootstrap_na}"
-                )
-            else:
-                logger.error(
-                    f"Failed to register transfer engine info for tp_rank={self.tp_rank}: "
-                    f"{resp.status_code}, {resp.text}"
-                )
-        except Exception as e:
-            logger.error(
-                f"Failed to register transfer engine info for tp_rank={self.tp_rank}: {e}"
+            from nixl._api import nixl_agent, nixl_agent_config
+        except ImportError as e:
+            logger.warning(
+                "Please install NIXL for using the NIXL remote instance weight "
+                "transfer backend. See "
+                "https://github.com/ai-dynamo/nixl/blob/main/README.md"
             )
+            return
+
+        backend = envs.SGLANG_REMOTE_INSTANCE_NIXL_BACKEND.get()
+        agent_config = nixl_agent_config(backends=[backend])
+        agent_name = str(uuid.uuid4())
+        agent = nixl_agent(agent_name, agent_config)
+
+        available_plugins = agent.get_plugin_list()
+        if backend not in available_plugins:
+            raise ValueError(
+                f"NIXL backend '{backend}' not found. Available: {available_plugins}. "
+                f"Please install the required NIXL plugin or choose from: {available_plugins}"
+            )
+
+        self.remote_instance_nixl_agent = agent
+        self.remote_instance_transfer_engine_session_id = agent_name
+        # get_agent_metadata() is NOT called here. It must be called after
+        # register_memory_region_nixl() so the blob includes the VRAM rkeys
+        # the Miles peer needs to RDMA-WRITE into the weight buffers.
+        # See initialize() where it is called post-registration.
+        self.remote_instance_transfer_engine_agent_metadata = None
+        logger.info(
+            f"NIXL weight-transfer agent initialized (agent_name={agent_name}, "
+            f"backend={backend}) for tp_rank={self.tp_rank}"
+        )
 
     def _publish_modelexpress_metadata(self):
         """Publish TransferEngine metadata to ModelExpress server (seed mode)."""
@@ -848,17 +874,35 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         The bootstrap server runs on node_rank==0. For multi-node setups, the
         host is derived from dist_init_addr. For single-node, use 127.0.0.1.
         """
+        import base64
+
         import requests as http_requests
 
         bootstrap_url = self._get_bootstrap_url()
         url = f"{bootstrap_url}/register_transfer_engine_info"
 
-        payload = {
-            "tp_rank": self.tp_rank,
-            "transfer_engine_info": {
+        # Emit a backend-tagged dict (design §5). NIXL needs the peer to
+        # add_remote_agent() before any transfer, so we publish agent_name +
+        # the opaque agent_metadata (base64-encoded for JSON transport).
+        if self.remote_instance_nixl_agent is not None:
+            transfer_engine_info = {
+                "backend": "nixl",
+                "agent_name": self.remote_instance_transfer_engine_session_id,
+                "agent_metadata": base64.b64encode(
+                    self.remote_instance_transfer_engine_agent_metadata
+                ).decode("ascii"),
+                "weights_info_dict": self.remote_instance_transfer_engine_weight_info,
+            }
+        else:
+            transfer_engine_info = {
+                "backend": "mooncake",
                 "session_id": self.remote_instance_transfer_engine_session_id,
                 "weights_info_dict": self.remote_instance_transfer_engine_weight_info,
-            },
+            }
+
+        payload = {
+            "tp_rank": self.tp_rank,
+            "transfer_engine_info": transfer_engine_info,
         }
 
         try:
